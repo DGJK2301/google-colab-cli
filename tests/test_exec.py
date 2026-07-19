@@ -150,6 +150,63 @@ def test_cli_exec_outputs(
     assert "line1\nline2\n" in result.stderr
 
 
+def test_cli_exec_fail_on_error_returns_nonzero(
+    mock_store, mock_runtime_class, mock_common_state
+):
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.url = "http://url"
+    mock_session.token = "token"
+    mock_session.kernel_id = None
+    mock_session.session_id = None
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = [
+        [],
+        [{"output_type": "error", "ename": "RuntimeError", "evalue": "boom"}],
+    ]
+
+    result = runner.invoke(
+        app,
+        ["exec", "-s", "s1", "--fail-on-error"],
+        input="raise RuntimeError('boom')",
+    )
+
+    assert result.exit_code == 1
+    assert "Cell execution failed" in result.stderr
+    mock_runtime.stop.assert_called_once_with()
+
+
+def test_cli_exec_rejects_cell_title_for_python_file(
+    mock_store, mock_runtime_class, mock_common_state, tmp_path
+):
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+    script = tmp_path / "script.py"
+    script.write_text("print('hello')", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "exec",
+            "-s",
+            "s1",
+            "-f",
+            str(script),
+            "--cell-title",
+            "Setup",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "only valid for .ipynb files" in result.stderr
+    mock_runtime_class.assert_not_called()
+
+
 def test_cli_exec_empty_code(mock_runtime_class, mock_store, mock_common_state):
     mock_session = MagicMock()
     mock_session.name = "s1"

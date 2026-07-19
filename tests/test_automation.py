@@ -146,6 +146,8 @@ def test_read_line_from_controlling_tty_falls_back_to_stdin():
             raise OSError("No /dev/tty on Windows")
         return real_open(path, *args, **kwargs)
 
-    with patch("colab_cli.commands.automation.open", side_effect=fake_open), \
-            patch("colab_cli.commands.automation.sys.stdin", io.StringIO("entered\n")):
+    with (
+        patch("colab_cli.commands.automation.open", side_effect=fake_open),
+        patch("colab_cli.commands.automation.sys.stdin", io.StringIO("entered\n")),
+    ):
         assert _read_line_from_controlling_tty() == "entered\n"

@@ -75,7 +75,6 @@ def save_output(outputs, cell):
             )
 
 
-
 def display_output(out, output_image=None):
     if out.get("output_type") == "stream":
         stream = sys.stderr if out.get("name") == "stderr" else sys.stdout
@@ -103,6 +102,42 @@ def display_output(out, output_image=None):
         pass
 
 
+def select_notebook_code_blocks(code_blocks, requested_titles):
+    if not requested_titles:
+        return code_blocks
+
+    if len(requested_titles) != len(set(requested_titles)):
+        typer.echo(
+            "[colab] Error: Duplicate --cell-title values are not allowed.", err=True
+        )
+        raise typer.Exit(2)
+
+    title_counts = {}
+    for block in code_blocks:
+        title = block.get("title")
+        if title:
+            title_counts[title] = title_counts.get(title, 0) + 1
+
+    for title in requested_titles:
+        count = title_counts.get(title, 0)
+        if count == 0:
+            typer.echo(
+                f"[colab] Error: Notebook cell title '{title}' was not found.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        if count > 1:
+            typer.echo(
+                f"[colab] Error: Notebook cell title '{title}' is ambiguous "
+                f"({count} matches).",
+                err=True,
+            )
+            raise typer.Exit(2)
+
+    requested = set(requested_titles)
+    return [block for block in code_blocks if block.get("title") in requested]
+
+
 def exec_command(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
@@ -117,6 +152,20 @@ def exec_command(
         Optional[float],
         typer.Option("--timeout", help="Timeout in seconds for code execution"),
     ] = 30.0,
+    cell_title: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--cell-title",
+            help="Execute the uniquely titled notebook cell; repeat to select more",
+        ),
+    ] = None,
+    fail_on_error: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-error",
+            help="Stop at the first Jupyter error output and return a nonzero exit code",
+        ),
+    ] = False,
 ):
     """Execute code in a session"""
     from colab_cli.common import state
@@ -139,13 +188,33 @@ def exec_command(
                         cell.id = str(uuid.uuid4())
 
                     if cell.cell_type == "code":
+                        title_match = TITLE_REGEX.search(cell.source)
                         code_blocks.append(
-                            {"code": cell.source, "id": cell.id, "cell": cell}
+                            {
+                                "code": cell.source,
+                                "id": cell.id,
+                                "cell": cell,
+                                "title": (
+                                    title_match.group(1).strip()
+                                    if title_match
+                                    else None
+                                ),
+                            }
                         )
+            code_blocks = select_notebook_code_blocks(code_blocks, cell_title)
         else:
+            if cell_title:
+                typer.echo(
+                    "[colab] Error: --cell-title is only valid for .ipynb files.",
+                    err=True,
+                )
+                raise typer.Exit(2)
             with open(file, "r") as f:
                 code_blocks.append({"code": f.read(), "id": None})
     else:
+        if cell_title:
+            typer.echo("[colab] Error: --cell-title requires a .ipynb file.", err=True)
+            raise typer.Exit(2)
         if is_stdin_tty():
             typer.echo("[colab] Error: No input provided. Pipe code or provide a file.")
             raise typer.Exit(1)
@@ -193,9 +262,8 @@ def exec_command(
             code = block["code"]
             identifier = None
             if is_nb:
-                title_match = TITLE_REGEX.search(code)
-                if title_match:
-                    identifier = title_match.group(1).strip()
+                if block.get("title"):
+                    identifier = block["title"]
                 elif block.get("id"):
                     identifier = block["id"]
                 else:
@@ -230,6 +298,15 @@ def exec_command(
                     "cell_id": block.get("id"),
                 },
             )
+            if fail_on_error and any(
+                output.get("output_type") == "error" for output in outputs
+            ):
+                failed_at = identifier or file or "stdin"
+                typer.echo(
+                    f"[colab] Error: Cell execution failed ({failed_at}).",
+                    err=True,
+                )
+                raise typer.Exit(1)
     finally:
         s.running = None
         state.store.add(s)

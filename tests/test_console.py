@@ -35,9 +35,7 @@ def mock_session():
 posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX termios/tty not available on Windows"
 )
-win32_only = pytest.mark.skipif(
-    sys.platform != "win32", reason="Windows-only test"
-)
+win32_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only test")
 
 
 @posix_only
@@ -81,9 +79,7 @@ def test_console_initialization(
 
     # 2. Verify raw mode setup and teardown
     mock_tcgetattr.assert_called_once_with(sys.stdin.fileno())
-    mock_setraw.assert_called_once_with(
-        sys.stdin.fileno(), console_mod.termios.TCSANOW
-    )
+    mock_setraw.assert_called_once_with(sys.stdin.fileno(), console_mod.termios.TCSANOW)
 
     # Teardown should happen in a finally block
     mock_tcsetattr.assert_called_once_with(
@@ -93,9 +89,7 @@ def test_console_initialization(
 
 @patch("colab_cli.console.websocket.WebSocketApp")
 @patch("colab_cli.console.sys.stdin.isatty")
-def test_console_piped_input(
-    mock_isatty, mock_ws_app, mock_session
-):
+def test_console_piped_input(mock_isatty, mock_ws_app, mock_session):
     mock_isatty.return_value = False
     mock_ws_instance = MagicMock()
     mock_ws_app.return_value = mock_ws_instance
@@ -307,9 +301,7 @@ def test_winconsole_raw_mode_sets_and_restores_real_modes():
     import colab_cli._winconsole as wc
 
     try:
-        in_handle = wc.open_console_device(
-            "CONIN$", wc.GENERIC_READ | wc.GENERIC_WRITE
-        )
+        in_handle = wc.open_console_device("CONIN$", wc.GENERIC_READ | wc.GENERIC_WRITE)
         out_handle = wc.open_console_device(
             "CONOUT$", wc.GENERIC_READ | wc.GENERIC_WRITE
         )

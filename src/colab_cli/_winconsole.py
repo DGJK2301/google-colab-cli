@@ -153,9 +153,7 @@ def get_console_size():
     keep polling without aborting the session.
     """
     try:
-        handle = open_console_device(
-            "CONOUT$", GENERIC_READ | GENERIC_WRITE
-        )
+        handle = open_console_device("CONOUT$", GENERIC_READ | GENERIC_WRITE)
     except OSError:
         return None
 

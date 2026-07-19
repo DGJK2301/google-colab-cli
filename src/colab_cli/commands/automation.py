@@ -53,7 +53,6 @@ def _read_line_from_controlling_tty() -> str:
 INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 600
 
 
-
 def run_automation(
     name: str,
     op: str,
