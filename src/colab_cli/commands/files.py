@@ -21,6 +21,34 @@ from typing import Optional
 from typing_extensions import Annotated
 
 from colab_cli.contents import ContentsClient
+from colab_cli.remote import RemoteFileOps, open_remote_executor
+from colab_cli.transfer import DEFAULT_CHUNK_SIZE, FileTransfer, TransferProgress
+
+
+def _progress(progress: TransferProgress) -> None:
+    if progress.total:
+        percent = 100.0 * progress.completed / progress.total
+    else:
+        percent = 100.0
+    typer.echo(
+        f"[colab] {progress.direction} {percent:5.1f}% "
+        f"({progress.completed}/{progress.total} bytes)",
+        err=True,
+    )
+
+
+def _open_transfer(session, state, *, chunk_size_mib: int):
+    if chunk_size_mib <= 0:
+        typer.echo("[colab] Error: --chunk-size-mib must be positive.", err=True)
+        raise typer.Exit(2)
+    executor = open_remote_executor(session, state.store, history=state.history)
+    transfer = FileTransfer(
+        ContentsClient(session),
+        RemoteFileOps(executor),
+        chunk_size=chunk_size_mib * DEFAULT_CHUNK_SIZE,
+        progress=_progress,
+    )
+    return executor, transfer
 
 
 def ls(
@@ -85,6 +113,23 @@ def upload(
     ] = None,
     local_path: Annotated[str, typer.Argument(help="Local file to upload")] = ...,
     remote_path: Annotated[str, typer.Argument(help="Remote path to upload to")] = ...,
+    chunk_size_mib: Annotated[
+        int,
+        typer.Option(
+            "--chunk-size-mib",
+            help="Bounded transfer chunk size in MiB",
+        ),
+    ] = 1,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume/--no-resume", help="Resume a verified partial upload"),
+    ] = True,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite/--no-overwrite", help="Replace an existing remote file"
+        ),
+    ] = True,
 ):
     """Upload a file to a session"""
     from colab_cli.common import state
@@ -97,18 +142,32 @@ def upload(
     if not os.path.isfile(local_path):
         typer.echo(f"[colab] Local file '{local_path}' not found.")
         raise typer.Exit(1)
-    contents = ContentsClient(s)
+    executor, transfer = _open_transfer(s, state, chunk_size_mib=chunk_size_mib)
     try:
-        contents.upload(local_path, remote_path)
+        result = transfer.upload(
+            local_path, remote_path, overwrite=overwrite, resume=resume
+        )
         state.history.log_event(
             name,
             "file_operation",
-            {"op": "upload", "local": local_path, "remote": remote_path},
+            {
+                "op": "upload",
+                "local": local_path,
+                "remote": remote_path,
+                "size": result.size,
+                "sha256": result.sha256,
+                "resumed_from": result.resumed_from,
+            },
         )
-        typer.echo(f"[colab] Uploaded '{local_path}' to '{remote_path}'")
+        typer.echo(
+            f"[colab] Uploaded '{local_path}' to '{remote_path}' "
+            f"({result.size} bytes, sha256={result.sha256})"
+        )
     except Exception as e:
         typer.echo(f"[colab] Upload failed: {e}")
         raise typer.Exit(1)
+    finally:
+        executor.close()
 
 
 def download(
@@ -121,6 +180,17 @@ def download(
     local_path: Annotated[
         str, typer.Argument(help="Local path to save the file")
     ] = ...,
+    chunk_size_mib: Annotated[
+        int,
+        typer.Option(
+            "--chunk-size-mib",
+            help="Bounded transfer chunk size in MiB",
+        ),
+    ] = 1,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume/--no-resume", help="Resume a verified partial download"),
+    ] = True,
 ):
     """Download a file from a session"""
     from colab_cli.common import state
@@ -130,18 +200,30 @@ def download(
     if not s:
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
-    contents = ContentsClient(s)
+    executor, transfer = _open_transfer(s, state, chunk_size_mib=chunk_size_mib)
     try:
-        contents.download(remote_path, local_path)
+        result = transfer.download(remote_path, local_path, resume=resume)
         state.history.log_event(
             name,
             "file_operation",
-            {"op": "download", "remote": remote_path, "local": local_path},
+            {
+                "op": "download",
+                "remote": remote_path,
+                "local": local_path,
+                "size": result.size,
+                "sha256": result.sha256,
+                "resumed_from": result.resumed_from,
+            },
         )
-        typer.echo(f"[colab] Downloaded '{remote_path}' to '{local_path}'")
+        typer.echo(
+            f"[colab] Downloaded '{remote_path}' to '{local_path}' "
+            f"({result.size} bytes, sha256={result.sha256})"
+        )
     except Exception as e:
         typer.echo(f"[colab] Download failed: {e}")
         raise typer.Exit(1)
+    finally:
+        executor.close()
 
 
 def edit(
@@ -159,7 +241,7 @@ def edit(
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
 
-    contents = ContentsClient(s)
+    executor, transfer = _open_transfer(s, state, chunk_size_mib=1)
 
     def get_file_hash(path):
         if not os.path.exists(path):
@@ -177,10 +259,10 @@ def edit(
     tf.close()
     try:
         try:
-            contents.download(remote_path, local_path)
-        except Exception:
-            # If download fails, assume file doesn't exist and start empty
-            pass
+            transfer.download(remote_path, local_path, resume=False)
+        except FileNotFoundError:
+            # A missing remote path is the documented create-new-file case.
+            open(local_path, "wb").close()
 
         hash_before = get_file_hash(local_path)
 
@@ -189,16 +271,24 @@ def edit(
         hash_after = get_file_hash(local_path)
 
         if hash_after != hash_before:
-            contents.upload(local_path, remote_path)
+            result = transfer.upload(
+                local_path, remote_path, overwrite=True, resume=True
+            )
             state.history.log_event(
                 name,
                 "file_operation",
-                {"op": "edit", "remote": remote_path},
+                {
+                    "op": "edit",
+                    "remote": remote_path,
+                    "size": result.size,
+                    "sha256": result.sha256,
+                },
             )
             typer.echo(f"[colab] Edited and uploaded '{remote_path}'")
         else:
             typer.echo(f"[colab] No changes made to '{remote_path}'")
     finally:
+        executor.close()
         try:
             os.unlink(local_path)
         except OSError:

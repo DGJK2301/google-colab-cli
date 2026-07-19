@@ -19,6 +19,8 @@ Designed to support seamless developer productivity, headless automation, and AI
 * **Instant VM Provisioning:** Spin up CPU, GPU (T4, L4, G4, H100, A100), or TPU (v5e1, v6e1) runtimes in seconds.
 * **Robust Code Execution:** Run local Python scripts, Jupyter Notebooks (`.ipynb`), or piped `stdin` code; launch interactive REPLs or raw TTY console shells.
 * **Ephemeral Job Runner (`colab run`):** Provision a fresh VM, execute a local script with forwarded arguments, retrieve output files, and automatically tear down the runtime in a single command.
+* **Reconnectable Remote Jobs:** Submit detached argv-based commands, persist stdout/stderr and status in the VM, then reattach with `jobs`, `tail`, `wait`, or `cancel` from a later CLI process.
+* **Verified Resumable Transfer:** Upload and download bounded chunks with prefix-safe resume, SHA-256 verification, request timeouts, and atomic destination replacement.
 * **Automatic Keep-Alive:** Built-in background daemon automatically prevents idle VM termination, keeping resource allocations active without requiring open browser tabs.
 * **Seamless Workspace Automation:** Mount Google Drive, authenticate Google Cloud Platform (GCP) credentials, and install dependencies with high-performance `uv` package management.
 * **State & Log Archival:** Inspect local session states or export interactive history logs to standard Jupyter Notebooks, Markdown, or structured JSONL.
@@ -87,10 +89,19 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | Command | Description |
 | --- | --- |
 | `colab ls [-s NAME] [PATH]` | List remote files on the VM |
-| `colab upload [-s NAME] LOCAL REMOTE` | Upload a local file to the VM filesystem |
-| `colab download [-s NAME] REMOTE LOCAL` | Download a remote file from the VM filesystem |
+| `colab upload [-s NAME] [--resume] LOCAL REMOTE` | Upload bounded chunks, verify SHA-256, and atomically commit |
+| `colab download [-s NAME] [--resume] REMOTE LOCAL` | Download bounded chunks with verified resume |
 | `colab rm [-s NAME] PATH` | Delete a remote file on the VM filesystem |
 | `colab edit [-s NAME] PATH` | Edit a remote file in-place using your local `$EDITOR` |
+
+### Persistent Remote Jobs
+| Command | Description |
+| --- | --- |
+| `colab submit [-s NAME] [--name JOB] [--cwd PATH] -- COMMAND...` | Start a detached argv-based command in an existing VM |
+| `colab jobs [-s NAME]` | List persisted remote job states |
+| `colab tail JOB [-s NAME] [--stream stdout\|stderr] [--offset N]` | Read one bounded log chunk and report the next byte offset |
+| `colab wait JOB [-s NAME] [--timeout SEC]` | Reattach, stream both logs, and return the remote exit code |
+| `colab cancel JOB [-s NAME] [--grace-seconds SEC]` | Stop a remote job with bounded graceful termination |
 
 ### Automation & Utilities
 | Command | Description |
@@ -125,6 +136,26 @@ colab download -s trainer checkpoints/model.bin ./model.bin
 colab stop -s trainer
 ```
 
+For a long task that must survive a local terminal disconnect, keep the VM and
+use the persistent job lifecycle instead of one long `exec` request:
+
+```bash
+colab new -s trainer --gpu G4
+colab upload -s trainer repo.bundle content/repo.bundle
+colab submit -s trainer --name checkout -- \
+  git clone /content/repo.bundle /content/project
+colab wait checkout -s trainer
+colab submit -s trainer --name pin-revision -- \
+  git -C /content/project checkout --detach <40-character-commit-sha>
+colab wait pin-revision -s trainer
+colab submit -s trainer --name train --cwd /content -- \
+  python -u /content/project/scripts/train.py --config /content/project/run.yaml
+
+# A later local process can reconnect to the same job.
+colab jobs -s trainer
+colab wait train -s trainer --timeout 21600
+```
+
 ### Workspace Notebook Execution with Drive Integration
 
 Mount Google Drive, run a local notebook against the VM kernel (outputs are written back into `report_output.ipynb`), export a Markdown log of the execution, and clean up:
@@ -144,6 +175,8 @@ colab stop -s analysis
 * **TTY Requirements:** The interactive commands `repl` and `console` require a local TTY. When running inside automated scripts or pipelines, make sure to pipe stdin (e.g., `echo "print(1)" | colab repl`) to trigger non-interactive execution modes.
 * **Transparent Code Execution:** When calling `colab exec -f file.py`, the CLI reads the file locally and transmits its content to the remote kernel. You do not need to manually upload files before execution.
 * **Storage & State Paths:** Session tokens and metadata are stored at `~/.config/colab-cli/sessions.json`. Global CLI settings are located at `~/.config/colab-cli/settings.json`. These can be customized or isolated via the global `--config` flag.
+* **Bulk Data:** CLI file transfer is designed for source bundles, checkpoints, and diagnostics. Keep multi-gigabyte datasets in Drive/GCS and localize them inside the VM.
+* **Job Failure Boundary:** Persistent jobs survive local CLI disconnects, not Colab VM reclamation. A new VM cannot resume the old process; preserved status is reported as `lost`.
 
 ### Ephemeral Accelerator Jobs
 
@@ -179,6 +212,7 @@ For comprehensive architectural overviews and deep-dives into specific CLI sub-s
 * [File Management & Jupyter Contents API](docs/03_file_management.md)
 * [Authentication Providers & VM Automation](docs/04_automation_and_utility.md)
 * [Ephemeral Job Runner Design](docs/05_run_command.md)
+* [Reconnectable Remote Jobs](docs/06_remote_jobs.md)
 
 To view interactive walkthroughs of eleven real-world automated scenarios, check out the [Demo Walkthroughs](docs/demos.md).
 

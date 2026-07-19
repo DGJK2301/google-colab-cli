@@ -22,9 +22,14 @@ from colab_cli.utils import get_status_code
 
 
 class ContentsClient:
-    def __init__(self, session_state: SessionState):
+    def __init__(
+        self,
+        session_state: SessionState,
+        request_timeout: tuple[float, float] = (10.0, 60.0),
+    ):
         self.base_url = session_state.url.rstrip("/")
         self.token = session_state.token
+        self.request_timeout = request_timeout
 
     def _request(
         self, method: str, path: str, params: dict = None, json_data: dict = None
@@ -37,7 +42,13 @@ class ContentsClient:
         if params:
             req_params.update(params)
 
-        response = requests.request(method, url, params=req_params, json=json_data)
+        response = requests.request(
+            method,
+            url,
+            params=req_params,
+            json=json_data,
+            timeout=self.request_timeout,
+        )
 
         if get_status_code(response) == 404:
             raise FileNotFoundError(f"File or directory not found: {path}")
@@ -57,6 +68,15 @@ class ContentsClient:
         with open(local_path, "rb") as f:
             content = f.read()
 
+        return self.upload_chunk(remote_path, content, chunk=1)
+
+    def upload_chunk(self, remote_path: str, content: bytes, *, chunk: int):
+        """Write one Jupyter LargeFileManager upload chunk.
+
+        ``chunk=1`` truncates/creates the file, positive later values append,
+        and ``chunk=-1`` appends the final chunk and runs post-save hooks.
+        """
+
         b64_content = base64.b64encode(content).decode("ascii")
         filename = remote_path.split("/")[-1]
 
@@ -66,7 +86,7 @@ class ContentsClient:
             "type": "file",
             "format": "base64",
             "content": b64_content,
-            "chunk": 1,
+            "chunk": chunk,
         }
 
         return self._request("PUT", remote_path, json_data=payload)

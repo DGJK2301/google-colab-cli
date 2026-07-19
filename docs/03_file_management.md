@@ -1,62 +1,75 @@
+---
+log:
+2026-07-20: Replaced whole-file base64 transfer with bounded, resumable Jupyter LargeFileManager chunks. Uploads and downloads now verify SHA-256 and size before atomic replacement; request timeouts are bounded and ambiguous upload responses are reconciled against remote size. The legacy Contents API remains in use for directory listing and deletion.
+---
+
 # Design: File Management (`ls`, `rm`, `upload`, `download`, `edit`)
 
 ## Overview
-File management on the Colab VM will be implemented using the Jupyter Contents API.
 
-## Approach
+Directory operations use the Jupyter Contents API. File transfer adds a kernel
+control channel for remote stat, hashing, fixed-size reads, and atomic commit.
+This avoids loading an entire multi-megabyte file and its base64 expansion into
+one HTTP request.
 
-### 1. Listing Files (`colab ls`)
-- **API**: `GET /api/contents/<path>` (as seen in HAR L68181).
-- **Parameters**: 
-    - `authuser`: 0
-    - `colab-runtime-proxy-token`: <session_token>
-- **Response**: JSON with `content` field containing an array of directory entries.
-- **Display**: Pretty-print the list (similar to `ls -F` or a formatted table).
+## Upload Contract
 
-### 2. Uploading Files (`colab upload`)
-- **API**: `PUT /api/contents/<remote_path>` (as seen in HAR).
-- **Payload**: JSON body:
-    ```json
-    {
-      "name": "filename.txt",
-      "path": "path/filename.txt",
-      "type": "file",
-      "format": "text",
-      "content": "..."
-    }
-    ```
-- **Base64 Encoding**: Use `format: base64` for binary files.
-- **Progress**: Implement a simple progress bar for large uploads by chunking or providing status updates.
+`colab upload` defaults to 1 MiB source chunks and uses Jupyter Server's
+`LargeFileManager` protocol:
 
-### 3. Downloading Files (`colab download`)
-- **API**: `GET /api/contents/<remote_path>?content=1` (as seen in HAR).
-- **Response**: JSON with `content` field.
-- **Handling**: Decodes content based on `format` (text or base64) and saves it locally.
+1. Hash the local file without loading it into memory.
+2. Select a deterministic temporary path from the destination and SHA-256.
+3. If a partial file exists, compare the remote and local prefix hashes before
+   resuming. A mismatched or oversized partial file is removed.
+4. Send `chunk=1` to create/truncate, positive later chunks to append, and an
+   empty `chunk=-1` marker to finalize Jupyter's save lifecycle.
+5. Recompute remote size and SHA-256 in the kernel.
+6. Atomically replace the destination with `os.replace` only after verification.
 
-### 4. Deleting Files (`colab rm`)
-- **API**: `DELETE /api/contents/<remote_path>`.
+Every HTTP call has a connect/read timeout. If an upload response is lost, the
+client queries the remote temporary size: the chunk is accepted only when the
+size is exactly the before- or after-write boundary. Any other size fails.
 
-### 5. Editing Files (`colab edit`)
-- **Approach**: Combines downloading the remote file, opening it in the user's `$EDITOR` locally, and subsequently uploading the changed file if modifications were made.
-- **State tracking**: Uses a SHA-256 hash to track file changes securely and deterministically between before and after the editor is invoked.
-- **Fallbacks**: Creates an empty local temporary file if the target file on the Colab runtime doesn't exist yet, essentially acting like `touch`.
+```bash
+colab upload -s work --chunk-size-mib 1 --resume repo.bundle content/repo.bundle
+```
 
-## Implementation Details
-- **Base URL**: The backend URL obtained during session assignment.
-- **Proxy Token**: The `colab-runtime-proxy-token` is required for each request.
-- **Error Handling**: Handle 404 (not found) and 403 (unauthorized).
-- **Large Files**: The Contents API might have limitations for very large files. If so, we'll implement a fallback via the kernel (streaming chunks).
+`--no-resume` discards the deterministic partial file. `--no-overwrite`
+prevents replacement of an existing final destination.
 
-## Testing Strategy
-TDD is mandatory for all file management features.
+## Download Contract
 
-### 1. Mock Contents API
-- **Test Case**: Verify `colab ls` correctly parses a Jupyter `contents` JSON response with `type: directory` and `type: file`.
-- **Test Case**: Verify `colab upload` correctly base64-encodes a binary local file for the `PUT` payload.
-- **Test Case**: Verify `colab download` correctly decodes the `content` field from the `GET` response and saves it locally.
-- **Test Case**: Verify `colab edit` safely handles when a file is or isn't modified.
-- **Test Case**: Verify `colab edit` securely opens a system editor safely through mocks without hanging the testing environment.
+`colab download` obtains the authoritative remote size/SHA-256, then reads
+bounded base64 chunks through short kernel calls. Data is written to
+`<target>.colab-download.part` with `fsync`; a verified partial download may be
+resumed after prefix-hash comparison. The final local path is replaced only
+after full size and SHA verification.
 
-### 2. Error Cases
-- **Test Case**: Verify 404 responses are correctly caught and presented as a "File not found" error to the user.
-- **Test Case**: Verify correct handling of large file uploads exceeding API limits via kernel streaming.
+## Other Operations
+
+- `ls`: `GET /api/contents/<path>`.
+- `rm`: `DELETE /api/contents/<path>`.
+- `edit`: verified download, local `$EDITOR`, then verified upload. Only an
+  actual remote 404 creates an empty file; unrelated failures are not hidden.
+
+## Scope
+
+The transfer path is intended for source bundles, configuration, checkpoints,
+and diagnostic artifacts. Multi-gigabyte datasets should stay in Drive, GCS,
+or another object store and be localized from inside the VM. CLI transfer does
+not turn the Jupyter control channel into a bulk data plane.
+
+The chunk marker semantics follow Jupyter Server's
+[`LargeFileManager`](https://github.com/jupyter-server/jupyter_server/blob/main/jupyter_server/services/contents/largefilemanager.py).
+
+## Verification
+
+Tests cover:
+
+- bounded chunk markers and request timeouts;
+- verified resume and mismatched-prefix reset;
+- an ambiguous response after the server wrote a chunk;
+- SHA/size verification before final replacement;
+- interrupted download resume;
+- CLI cleanup on success and failure;
+- an actual private-repository bundle round trip in the free CPU live test.

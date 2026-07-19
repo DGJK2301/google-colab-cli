@@ -23,7 +23,15 @@ from typing_extensions import Annotated
 from colab_cli import auto_update
 from colab_cli.auth import AuthProvider
 from colab_cli.common import state, setup_logging
-from colab_cli.commands import session, execution, files, automation, run, utility
+from colab_cli.commands import (
+    automation,
+    execution,
+    files,
+    jobs,
+    run,
+    session,
+    utility,
+)
 
 
 class AlphabeticalGroup(TyperGroup):
@@ -109,6 +117,11 @@ def callback(
         "README",
         "skill",
         "SKILL",
+        "submit",
+        "jobs",
+        "tail",
+        "wait",
+        "cancel",
     }
     if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED:
         auto_update.run_background_check()
@@ -142,6 +155,7 @@ def help_command(
 session.register(app)
 execution.register(app)
 files.register(app)
+jobs.register(app)
 automation.register(app)
 run.register(app)
 utility.register(app)

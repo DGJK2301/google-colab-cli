@@ -25,6 +25,7 @@ from colab_cli.client import (
     ColabRequestError,
     PostAssignmentResponse,
 )
+from colab_cli.transfer import TransferResult
 
 runner = CliRunner()
 
@@ -436,46 +437,76 @@ def test_cli_rm(mock_contents_class, mock_store, mock_common_state):
 
 
 @patch("colab_cli.commands.files.os.path.isfile")
-@patch("colab_cli.commands.files.ContentsClient")
-def test_cli_upload(mock_contents_class, mock_isfile, mock_store, mock_common_state):
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_cli_upload(
+    mock_open_executor,
+    mock_transfer_class,
+    mock_isfile,
+    mock_store,
+    mock_common_state,
+):
     mock_session_state = MagicMock()
     mock_store.get.return_value = mock_session_state
     mock_isfile.return_value = True
+    mock_transfer_class.return_value.upload.return_value = TransferResult(
+        "remote.txt", 5, "abc", 0
+    )
 
     mock_common_state.resolve_session.return_value = "s1"
     result = runner.invoke(app, ["upload", "-s", "s1", "local.txt", "remote.txt"])
     assert result.exit_code == 0
 
-    mock_contents_class.return_value.upload.assert_called_once_with(
-        "local.txt", "remote.txt"
+    mock_transfer_class.return_value.upload.assert_called_once_with(
+        "local.txt", "remote.txt", overwrite=True, resume=True
     )
     assert "Uploaded 'local.txt' to 'remote.txt'" in result.output
+    mock_open_executor.return_value.close.assert_called_once_with()
 
 
-@patch("colab_cli.commands.files.ContentsClient")
-def test_cli_download(mock_contents_class, mock_store, mock_common_state):
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_cli_download(
+    mock_open_executor, mock_transfer_class, mock_store, mock_common_state
+):
     mock_session_state = MagicMock()
     mock_store.get.return_value = mock_session_state
+    mock_transfer_class.return_value.download.return_value = TransferResult(
+        "local.txt", 5, "abc", 0
+    )
 
     mock_common_state.resolve_session.return_value = "s1"
     result = runner.invoke(app, ["download", "-s", "s1", "remote.txt", "local.txt"])
     assert result.exit_code == 0
 
-    mock_contents_class.return_value.download.assert_called_once_with(
-        "remote.txt", "local.txt"
+    mock_transfer_class.return_value.download.assert_called_once_with(
+        "remote.txt", "local.txt", resume=True
     )
     assert "Downloaded 'remote.txt' to 'local.txt'" in result.output
+    mock_open_executor.return_value.close.assert_called_once_with()
 
 
-@patch("colab_cli.commands.files.ContentsClient")
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
 @patch("click.edit")
 def test_cli_edit_no_changes(
-    mock_edit, mock_contents_class, mock_store, mock_common_state
+    mock_edit,
+    mock_open_executor,
+    mock_transfer_class,
+    mock_store,
+    mock_common_state,
 ):
     mock_session_state = MagicMock()
     mock_store.get.return_value = mock_session_state
 
     mock_common_state.resolve_session.return_value = "s1"
+
+    def mock_download(_, local_path, **kwargs):
+        with open(local_path, "wb") as stream:
+            stream.write(b"old content")
+        return TransferResult(local_path, 11, "abc", 0)
+
+    mock_transfer_class.return_value.download.side_effect = mock_download
 
     # Simulate editor making no changes by not modifying the file
     def mock_edit_side_effect(filename, **kwargs):
@@ -486,20 +517,36 @@ def test_cli_edit_no_changes(
     result = runner.invoke(app, ["edit", "-s", "s1", "remote.txt"])
 
     assert result.exit_code == 0
-    mock_contents_class.return_value.download.assert_called_once()
-    mock_contents_class.return_value.upload.assert_not_called()
+    mock_transfer_class.return_value.download.assert_called_once()
+    mock_transfer_class.return_value.upload.assert_not_called()
     assert "No changes made to 'remote.txt'" in result.output
+    mock_open_executor.return_value.close.assert_called_once_with()
 
 
-@patch("colab_cli.commands.files.ContentsClient")
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
 @patch("click.edit")
 def test_cli_edit_with_changes(
-    mock_edit, mock_contents_class, mock_store, mock_common_state
+    mock_edit,
+    mock_open_executor,
+    mock_transfer_class,
+    mock_store,
+    mock_common_state,
 ):
     mock_session_state = MagicMock()
     mock_store.get.return_value = mock_session_state
 
     mock_common_state.resolve_session.return_value = "s1"
+
+    def mock_download(_, local_path, **kwargs):
+        with open(local_path, "wb") as stream:
+            stream.write(b"old content")
+        return TransferResult(local_path, 11, "abc", 0)
+
+    mock_transfer_class.return_value.download.side_effect = mock_download
+    mock_transfer_class.return_value.upload.return_value = TransferResult(
+        "remote.txt", 22, "def", 0
+    )
 
     # Simulate editor modifying the file
     def mock_edit_side_effect(filename, **kwargs):
@@ -512,9 +559,10 @@ def test_cli_edit_with_changes(
     result = runner.invoke(app, ["edit", "-s", "s1", "remote.txt"])
 
     assert result.exit_code == 0
-    mock_contents_class.return_value.download.assert_called_once()
-    mock_contents_class.return_value.upload.assert_called_once()
+    mock_transfer_class.return_value.download.assert_called_once()
+    mock_transfer_class.return_value.upload.assert_called_once()
     assert "Edited and uploaded 'remote.txt'" in result.output
+    mock_open_executor.return_value.close.assert_called_once_with()
 
 
 def _make_400_error(message="Bad Request"):
