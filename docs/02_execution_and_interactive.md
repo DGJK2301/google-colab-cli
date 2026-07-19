@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-19: Addressed Windows console review findings. The resize poller now starts from the WebSocket open callback, after `_is_running` becomes true, and forwards the size already read from `CONOUT$` instead of querying a possibly redirected stdout. `raw_mode()` restores every console mode that was successfully changed even when later VT setup fails, and Win32 calls preserve the real last-error value for diagnostics. Console handles are closed for partial initialization as well as normal exit. The live Windows smoke uses an attempt-unique session name, always tries to stop that owned session including when `colab new` fails after persisting it, and returns nonzero if `stop` or the final session audit fails.
 2026-07-19: Hardened reconnects to an existing kernel. `jupyter-kernel-client` can return from `start_channels()` after its readiness wait expires even though the WebSocket never opened; `ColabRuntime` now rejects that half-connected client, preserves the already-created kernel id, closes only the failed local connection, and performs the existing bounded startup retry. The live Windows CPU smoke covers two consecutive `exec` invocations against one session.
 2026-07-19: Added automation-safe notebook execution controls. `colab exec --cell-title <title>` may be repeated to select uniquely named `# @title` code cells while preserving notebook order; missing or ambiguous titles fail before a kernel connection. `--fail-on-error` stops after the first Jupyter `error` output and returns exit code 1. Both controls are opt-in so existing whole-notebook and fail-open behavior remains compatible.
 2026-07-05: Added Windows support to `colab console`. The POSIX `termios`/`tty` imports in `console.py` were unguarded, which crashed the entire CLI on Windows (`import colab_cli.cli` raised `ModuleNotFoundError: No module named 'termios'`). The imports are now platform-guarded (`termios = tty = None` on win32), and a new `colab_cli/_winconsole.py` provides a ctypes-based raw-console path: it saves/restores CONIN$/CONOUT$ modes, enables `ENABLE_VIRTUAL_TERMINAL_INPUT` (disabling echo/line/processed input) and `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on output, and a daemon polling thread replaces `SIGWINCH` (which does not exist on Windows) by sampling `GetConsoleScreenBufferInfo` every 0.25s. The piped-stdin path is unchanged and cross-platform. `colab repl`'s `PromptSession` construction was also deferred from `ColabREPL.__init__` to `run()` so it no longer requires a real console at construction time (prompt_toolkit's `Win32Output` calls `GetConsoleScreenBufferInfo` at init and raised under captured stdout on Windows).
@@ -72,6 +73,13 @@ TDD is mandatory for all execution features.
 - **Test Case**: `colab console` with piped stdin sends `exit\n` and calls `ws.close()` on EOF (regression: previously sent `\x04` only and hung).
 - **Test Case**: `colab console` in TTY mode does not synthesize an exit on EOF (the user owns the session lifecycle).
 - **Test Case**: `print_kitty` is a no-op when `sys.stdout.isatty()` is false (regression: previously emitted ANSI/base64 into pipes and files).
+- **Test Case**: On Windows, the resize poller starts only after the WebSocket open callback and observes `_is_running=True`.
+- **Test Case**: On Windows with redirected stdout, the resize poller forwards the dimensions read directly from `CONOUT$`.
+- **Test Case**: On Windows, output VT setup failure restores an input mode that was already changed before propagating the error.
+- **Test Case**: A failed Win32 console API reports its real nonzero `winerror`.
+- **Test Case**: If a kernel startup callback fails after the client was cached, the stopped client is removed and the next access reconnects.
+- **Test Case**: If the live Windows smoke's `colab new` returns nonzero, its `finally` block still stops the attempt-unique session without touching a pre-existing fixed-name session.
+- **Test Case**: If the smoke succeeds but `colab stop` returns nonzero, the script completes its final session audit and then exits nonzero.
 
 ### 3. Live Windows CPU smoke
 

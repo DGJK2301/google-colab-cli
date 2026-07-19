@@ -137,6 +137,13 @@ def new(
     from colab_cli.common import state
 
     name = session or uuid.uuid4().hex[:6]
+    if state.store.get(name) is not None:
+        typer.echo(
+            f"[colab] Session '{name}' already exists. Stop it or choose a new name.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     variant = Variant.DEFAULT
     accelerator = Accelerator.NONE
 
@@ -176,76 +183,98 @@ def new(
             raise typer.Exit(code=1)
         raise
 
-    if isinstance(res, PostAssignmentResponse):
-        token = res.runtime_proxy_info.token
-        url = res.runtime_proxy_info.url
-        endpoint = res.endpoint
-    else:
-        token = (
-            res.runtime_proxy_info.token
-            if hasattr(res, "runtime_proxy_info")
-            else getattr(res, "runtime_proxy_token", "")
-        )
-        url = res.runtime_proxy_info.url if hasattr(res, "runtime_proxy_info") else ""
-        endpoint = res.endpoint
-
-    # Importing locally to avoid a top-level circular import via auth.
-
-    s = SessionState(
-        name=name,
-        token=token,
-        url=url,
-        endpoint=endpoint,
-        variant=variant.value,
-        accelerator=accelerator.value,
-    )
-
-    # Pre-flight the keep-alive ping once. If it returns a 403 caused by
-    # missing OAuth scopes we know the daemon will fail and the VM would be
-    # idle-pruned. Catch it now so we (a) never leak a billable assignment,
-    # (b) surface an actionable remediation instead of a session that quietly
-    # disappears a few minutes later.
+    endpoint = res.endpoint
+    s = None
     try:
-        state.client.keep_alive_assignment(endpoint)
-    except ColabRequestError as e:
-        if get_status_code(e) == 403 and _is_scope_error(e):
+        if isinstance(res, PostAssignmentResponse):
+            token = res.runtime_proxy_info.token
+            url = res.runtime_proxy_info.url
+        else:
+            token = (
+                res.runtime_proxy_info.token
+                if hasattr(res, "runtime_proxy_info")
+                else getattr(res, "runtime_proxy_token", "")
+            )
+            url = (
+                res.runtime_proxy_info.url if hasattr(res, "runtime_proxy_info") else ""
+            )
+
+        s = SessionState(
+            name=name,
+            token=token,
+            url=url,
+            endpoint=endpoint,
+            variant=variant.value,
+            accelerator=accelerator.value,
+        )
+
+        # Pre-flight the keep-alive ping once. If it returns a 403 caused by
+        # missing OAuth scopes we know the daemon will fail and the VM would be
+        # idle-pruned. Catch it now so we surface actionable remediation instead
+        # of a session that quietly disappears a few minutes later.
+        try:
+            state.client.keep_alive_assignment(endpoint)
+        except ColabRequestError as e:
+            if get_status_code(e) == 403 and _is_scope_error(e):
+                typer.echo(
+                    "[colab] Keep-alive pre-flight failed: your credentials "
+                    "are missing an OAuth scope required by Colab.\n",
+                    err=True,
+                )
+                typer.echo(_scope_remediation_message(state.auth_provider), err=True)
+                raise typer.Exit(code=1)
+            # Other failures do not block session creation; the daemon retries
+            # and logs via the existing keep_alive_error event path.
+
+        # Persist before spawning so the daemon's initial state lookup cannot
+        # race. Persist again after spawn to record the PID.
+        state.store.add(s)
+        s.keep_alive_pid = spawn_keep_alive(
+            endpoint,
+            name,
+            auth_provider=state.auth_provider,
+            config_path=state.config_path,
+        )
+        state.store.add(s)
+        state.history.log_event(
+            name,
+            "session_created",
+            {
+                "endpoint": endpoint,
+                "variant": variant.value,
+                "accelerator": accelerator.value,
+            },
+        )
+    except BaseException:
+        if s is not None and s.keep_alive_pid:
+            try:
+                from colab_cli.common import kill_process
+
+                kill_process(s.keep_alive_pid)
+            except Exception as cleanup_error:
+                typer.echo(
+                    f"[colab] Failed to stop keep-alive during rollback: "
+                    f"{cleanup_error}",
+                    err=True,
+                )
+        try:
+            state.store.remove(name)
+        except Exception as cleanup_error:
             typer.echo(
-                "[colab] Keep-alive pre-flight failed: your credentials "
-                "are missing an OAuth scope required by Colab.\n",
+                f"[colab] Failed to remove session state during rollback: "
+                f"{cleanup_error}",
                 err=True,
             )
-            typer.echo(_scope_remediation_message(state.auth_provider), err=True)
-            # Don't leak the assignment we just created.
-            try:
-                state.client.unassign(endpoint)
-            except Exception:
-                pass
-            raise typer.Exit(code=1)
-        # Other failures: don't block session creation — the daemon will
-        # retry and log via the existing keep_alive_error event path.
+        try:
+            state.client.unassign(endpoint)
+        except Exception as cleanup_error:
+            typer.echo(
+                f"[colab] Failed to unassign endpoint '{endpoint}' during rollback: "
+                f"{cleanup_error}",
+                err=True,
+            )
+        raise
 
-    # Persist the session BEFORE spawning the daemon so the daemon's
-    # initial `state.store.get(session_name)` check doesn't race and
-    # exit with `reason=session_not_found`. We re-persist below to also
-    # capture the daemon PID.
-    state.store.add(s)
-    s.keep_alive_pid = spawn_keep_alive(
-        endpoint,
-        name,
-        auth_provider=state.auth_provider,
-        config_path=state.config_path,
-    )
-
-    state.store.add(s)
-    state.history.log_event(
-        name,
-        "session_created",
-        {
-            "endpoint": endpoint,
-            "variant": variant.value,
-            "accelerator": accelerator.value,
-        },
-    )
     typer.echo("[colab] Session READY.")
 
 

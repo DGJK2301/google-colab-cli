@@ -22,7 +22,7 @@ import contextlib
 import ctypes
 from ctypes import wintypes
 
-kernel32 = ctypes.windll.kernel32
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 STD_INPUT_HANDLE = -10
 STD_OUTPUT_HANDLE = -11
@@ -182,9 +182,14 @@ def raw_mode():
     Yields a ``(saved_input_mode, saved_output_mode)`` tuple.
     """
     in_handle = open_console_device("CONIN$", GENERIC_READ | GENERIC_WRITE)
-    out_handle = open_console_device("CONOUT$", GENERIC_READ | GENERIC_WRITE)
+    out_handle = None
+    old_in_mode = None
+    old_out_mode = None
+    input_mode_changed = False
+    output_mode_changed = False
 
     try:
+        out_handle = open_console_device("CONOUT$", GENERIC_READ | GENERIC_WRITE)
         old_in_mode = get_console_mode(in_handle)
         old_out_mode = get_console_mode(out_handle)
 
@@ -197,13 +202,26 @@ def raw_mode():
         new_out_mode = old_out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING
 
         set_console_mode(in_handle, new_in_mode)
+        input_mode_changed = True
         set_console_mode(out_handle, new_out_mode)
+        output_mode_changed = True
 
-        try:
-            yield (old_in_mode, old_out_mode)
-        finally:
-            set_console_mode(in_handle, old_in_mode)
-            set_console_mode(out_handle, old_out_mode)
+        yield (old_in_mode, old_out_mode)
     finally:
+        restore_error = None
+        if input_mode_changed:
+            try:
+                set_console_mode(in_handle, old_in_mode)
+            except OSError as exc:
+                restore_error = exc
+        if output_mode_changed:
+            try:
+                set_console_mode(out_handle, old_out_mode)
+            except OSError as exc:
+                if restore_error is None:
+                    restore_error = exc
+        if out_handle is not None:
+            close_handle(out_handle)
         close_handle(in_handle)
-        close_handle(out_handle)
+        if restore_error is not None:
+            raise restore_error

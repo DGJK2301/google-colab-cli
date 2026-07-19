@@ -74,11 +74,13 @@ def on_close(ws, close_status_code, close_msg):
     _is_running = False
 
 
-def send_terminal_size(ws):
+def send_terminal_size(ws, size=None):
     """Sends the current terminal size to the remote backend."""
     try:
-        size = os.get_terminal_size()
-        payload = json.dumps({"cols": size.columns, "rows": size.lines})
+        if size is None:
+            size = os.get_terminal_size()
+        columns, rows = size
+        payload = json.dumps({"cols": columns, "rows": rows})
         ws.send(payload)
     except Exception as e:
         logger.debug(f"Failed to send terminal size: {e}")
@@ -146,20 +148,12 @@ def connect_console(session: SessionState):
         fd = None
         old_settings = None
 
-    ws = websocket.WebSocketApp(
-        url=ws_url,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-    )
-
     def handle_sigwinch(signum, frame):
         """Handle window resize events."""
         if _is_running:
             send_terminal_size(ws)
 
-    def win_poll_resize():
+    def win_poll_resize(opened_ws):
         """Poll console size on Windows where SIGWINCH does not exist."""
         last_size = None
         while _is_running:
@@ -167,16 +161,32 @@ def connect_console(session: SessionState):
                 size = _winconsole.get_console_size()
                 if size and size != last_size:
                     last_size = size
-                    send_terminal_size(ws)
+                    send_terminal_size(opened_ws, size)
             except Exception:
                 pass
             time.sleep(0.25)
 
+    def handle_open(opened_ws):
+        on_open(opened_ws)
+        if is_tty and sys.platform == "win32":
+            resize_thread = threading.Thread(
+                target=win_poll_resize,
+                args=(opened_ws,),
+                daemon=True,
+            )
+            resize_thread.start()
+
+    ws = websocket.WebSocketApp(
+        url=ws_url,
+        on_open=handle_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+    )
+
     try:
         if is_tty:
             if sys.platform == "win32":
-                resize_thread = threading.Thread(target=win_poll_resize, daemon=True)
-                resize_thread.start()
                 with _winconsole.raw_mode():
                     ws.run_forever()
             else:

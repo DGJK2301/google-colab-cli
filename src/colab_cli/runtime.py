@@ -178,10 +178,11 @@ class ColabRuntime:
             if self.on_kernel_started:
                 self.on_kernel_started(self.kernel_id)
 
-    @staticmethod
-    def _discard_candidate(candidate) -> None:
+    def _discard_candidate(self, candidate) -> None:
         if candidate is None:
             return
+        if self._kernel_client is candidate:
+            self._kernel_client = None
         try:
             candidate.stop(shutdown_kernel=False)
         except Exception as e:

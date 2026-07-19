@@ -238,7 +238,6 @@ def test_console_initialization_windows(
     mock_get_console_size.return_value = (80, 24)
     mock_ws_instance = MagicMock()
     mock_ws_app.return_value = mock_ws_instance
-    mock_ws_instance.run_forever.return_value = None
 
     mock_cm = MagicMock()
     mock_cm.__enter__ = MagicMock(return_value=(0, 0))
@@ -246,6 +245,13 @@ def test_console_initialization_windows(
     mock_raw_mode.return_value = mock_cm
 
     with patch("colab_cli.console.threading.Thread") as mock_thread:
+
+        def open_then_return():
+            # The resize poller must not exist until the WebSocket has opened.
+            mock_thread.assert_not_called()
+            mock_ws_app.call_args.kwargs["on_open"](mock_ws_instance)
+
+        mock_ws_instance.run_forever.side_effect = open_then_return
         connect_console(mock_session)
 
     # 1. Verify URL transformation
@@ -258,12 +264,76 @@ def test_console_initialization_windows(
     mock_cm.__enter__.assert_called_once()
     mock_cm.__exit__.assert_called_once()
 
-    # 3. Resize poller thread is spawned
-    mock_thread.assert_called_once()
-    assert mock_thread.call_args[1].get("daemon") is True
+    # 3. stdin and resize poller threads are spawned only after on_open.
+    assert mock_thread.call_count == 2
+    assert all(call.kwargs.get("daemon") is True for call in mock_thread.call_args_list)
+
+    resize_call = next(
+        call
+        for call in mock_thread.call_args_list
+        if call.kwargs["target"].__name__ == "win_poll_resize"
+    )
+
+    def stop_after_one_poll(_seconds):
+        console_mod._is_running = False
+
+    console_mod._is_running = True
+    with (
+        patch("colab_cli.console.send_terminal_size") as mock_send_terminal_size,
+        patch("colab_cli.console.time.sleep", side_effect=stop_after_one_poll),
+    ):
+        resize_call.kwargs["target"](*resize_call.kwargs["args"])
+
+    mock_send_terminal_size.assert_called_once_with(mock_ws_instance, (80, 24))
 
     # 4. _is_running is cleared after the connection ends
     assert console_mod._is_running is False
+
+
+@win32_only
+def test_winconsole_raw_mode_restores_input_when_output_setup_fails():
+    import colab_cli._winconsole as wc
+
+    in_handle = MagicMock(name="in_handle")
+    out_handle = MagicMock(name="out_handle")
+    old_in_mode = wc.ENABLE_ECHO_INPUT | wc.ENABLE_LINE_INPUT
+    old_out_mode = 0
+
+    with (
+        patch(
+            "colab_cli._winconsole.open_console_device",
+            side_effect=[in_handle, out_handle],
+        ),
+        patch(
+            "colab_cli._winconsole.get_console_mode",
+            side_effect=[old_in_mode, old_out_mode],
+        ),
+        patch("colab_cli._winconsole.set_console_mode") as mock_set_mode,
+        patch("colab_cli._winconsole.close_handle"),
+    ):
+        mock_set_mode.side_effect = [None, OSError("output VT rejected"), None]
+
+        with pytest.raises(OSError, match="output VT rejected"):
+            with wc.raw_mode():
+                pytest.fail("raw_mode must not yield after output setup fails")
+
+    assert mock_set_mode.call_args_list[-1].args == (in_handle, old_in_mode)
+
+
+@win32_only
+def test_winconsole_reports_real_last_error_for_failed_api_call():
+    import ctypes
+
+    import colab_cli._winconsole as wc
+
+    ctypes.set_last_error(0)
+    with pytest.raises(OSError) as exc_info:
+        wc.open_console_device(
+            "COLAB_CLI_MISSING_CONSOLE_DEVICE$",
+            wc.GENERIC_READ | wc.GENERIC_WRITE,
+        )
+
+    assert exc_info.value.winerror not in (None, 0)
 
 
 @win32_only

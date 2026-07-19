@@ -36,6 +36,7 @@ def mock_client(mock_common_state):
 
 @pytest.fixture
 def mock_store(mock_common_state):
+    mock_common_state.store.get.return_value = None
     return mock_common_state.store
 
 
