@@ -16,6 +16,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from colab_cli.cli import app
@@ -314,7 +315,7 @@ def _extract_command_names(help_output: str) -> list[str]:
     inside a rich box (either rounded ╭/╰ or square ┌/└ styles — Rich picks
     the latter on some Windows environments). Returns names in order.
     """
-    lines = help_output.splitlines()
+    lines = unstyle(help_output).splitlines()
     in_commands = False
     names = []
     for line in lines:
@@ -340,6 +341,16 @@ def _extract_command_names(help_output: str) -> list[str]:
         tok = inner[1:].split()[0]
         names.append(tok)
     return names
+
+
+def test_extract_command_names_handles_ansi_styling():
+    help_output = (
+        "\x1b[2m┌─\x1b[0m\x1b[2m Commands ─┐\x1b[0m\n"
+        "\x1b[2m│\x1b[0m \x1b[1;36mexec\x1b[0m Execute code \x1b[2m│\x1b[0m\n"
+        "\x1b[2m└───────────────┘\x1b[0m\n"
+    )
+
+    assert _extract_command_names(help_output) == ["exec"]
 
 
 def test_cli_help_commands_sorted_alphabetically():
