@@ -58,6 +58,7 @@ def test_list_dir(mock_request, client):
         "https://fake-endpoint.colab.dev/api/contents/content",
         params={"authuser": "0", "colab-runtime-proxy-token": "test-token"},
         json=None,
+        timeout=(10.0, 60.0),
     )
     assert res["type"] == "directory"
     assert len(res["content"]) == 2
@@ -76,6 +77,7 @@ def test_rm_file(mock_request, client):
         "https://fake-endpoint.colab.dev/api/contents/content/file.txt",
         params={"authuser": "0", "colab-runtime-proxy-token": "test-token"},
         json=None,
+        timeout=(10.0, 60.0),
     )
 
 
@@ -118,6 +120,7 @@ def test_download_file(mock_request, client, tmp_path):
             "content": "1",
         },
         json=None,
+        timeout=(10.0, 60.0),
     )
 
     assert local_file.read_bytes() == content_bytes
@@ -149,4 +152,20 @@ def test_upload_file(mock_request, client, tmp_path):
             "content": expected_b64,
             "chunk": 1,
         },
+        timeout=(10.0, 60.0),
     )
+
+
+@patch("colab_cli.contents.requests.request")
+def test_upload_chunk_uses_large_file_manager_markers(mock_request, client):
+    mock_resp = MagicMock(spec=Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"type": "file", "size": 3}
+    mock_request.return_value = mock_resp
+
+    client.upload_chunk("content/archive.part", b"abc", chunk=2)
+
+    payload = mock_request.call_args.kwargs["json"]
+    assert payload["content"] == base64.b64encode(b"abc").decode("ascii")
+    assert payload["chunk"] == 2
+    assert mock_request.call_args.kwargs["timeout"] == (10.0, 60.0)
