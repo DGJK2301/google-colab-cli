@@ -1,4 +1,4 @@
-name: Windows tests
+name: Ubuntu tests
 
 on:
   pull_request:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.0
