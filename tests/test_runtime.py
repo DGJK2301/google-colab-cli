@@ -15,6 +15,7 @@
 from unittest.mock import MagicMock, patch
 
 import jupyter_kernel_client
+import pytest
 
 from colab_cli.runtime import ColabRuntime
 
@@ -44,6 +45,59 @@ def test_colab_runtime_kernel_client(mock_kc_cls):
     )
     mock_kc.start.assert_called_once()
     assert kc == mock_kc
+
+
+@patch("colab_cli.runtime.time.sleep")
+@patch("colab_cli.runtime.jupyter_kernel_client.KernelClient")
+def test_colab_runtime_retries_when_websocket_is_not_ready(mock_kc_cls, mock_sleep):
+    first = MagicMock()
+    first.id = "kernel-123"
+    first._manager.client.channels_running = False
+
+    second = MagicMock()
+    second.id = "kernel-123"
+    second._manager.client.channels_running = True
+
+    mock_kc_cls.side_effect = [first, second]
+    on_kernel_started = MagicMock()
+    runtime = ColabRuntime(
+        "http://url",
+        "token123",
+        on_kernel_started=on_kernel_started,
+    )
+
+    assert runtime.kernel_client is second
+    assert mock_kc_cls.call_count == 2
+    assert mock_kc_cls.call_args_list[1].kwargs["kernel_id"] == "kernel-123"
+    first.stop.assert_called_once_with(shutdown_kernel=False)
+    mock_sleep.assert_called_once_with(2)
+    on_kernel_started.assert_called_once_with("kernel-123")
+
+
+@patch("colab_cli.runtime.jupyter_kernel_client.KernelClient")
+def test_colab_runtime_discards_cached_client_when_session_callback_fails(mock_kc_cls):
+    first = MagicMock()
+    first.id = "kernel-123"
+    first._manager.client.channels_running = True
+    first._manager.client.session.session = "session-123"
+
+    second = MagicMock()
+    second.id = "kernel-123"
+    second._manager.client.channels_running = True
+
+    mock_kc_cls.side_effect = [first, second]
+    runtime = ColabRuntime(
+        "http://url",
+        "token123",
+        on_session_started=MagicMock(side_effect=OSError("state write failed")),
+    )
+
+    with pytest.raises(OSError, match="state write failed"):
+        runtime.kernel_client
+
+    assert runtime._kernel_client is None
+    first.stop.assert_called_once_with(shutdown_kernel=False)
+    assert runtime.kernel_client is second
 
 
 def test_colab_runtime_execute_code():

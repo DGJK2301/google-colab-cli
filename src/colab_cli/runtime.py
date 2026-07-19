@@ -20,6 +20,10 @@ import jupyter_kernel_client
 import requests
 
 
+class _KernelWebSocketNotReady(RuntimeError):
+    """The kernel exists, but its WebSocket channels did not become usable."""
+
+
 class ColabRuntime:
     def __init__(
         self,
@@ -94,6 +98,7 @@ class ColabRuntime:
             last_err = None
 
             for i in range(retries):
+                candidate = None
                 try:
                     client_kwargs = {
                         "subprotocol": jupyter_kernel_client.JupyterSubprotocol.DEFAULT,
@@ -103,7 +108,7 @@ class ColabRuntime:
                         # WSSession (Session) expects 'session' for the ID
                         client_kwargs["session"] = self.session_id
 
-                    self._kernel_client = jupyter_kernel_client.KernelClient(
+                    candidate = jupyter_kernel_client.KernelClient(
                         server_url=self.url,
                         token=self.token,
                         kernel_id=self.kernel_id,
@@ -115,17 +120,25 @@ class ColabRuntime:
                     )
                     # Force _own_kernel to False. This prevents jupyter-kernel-client
                     # from automatically deleting the kernel when the client is closed or deleted.
-                    self._kernel_client._own_kernel = False
+                    candidate._own_kernel = False
 
-                    self._kernel_client.start()
+                    candidate.start()
+                    self._remember_kernel_id(candidate)
+
+                    # jupyter-kernel-client currently lets start_channels() return
+                    # after its wait expires even when the WebSocket never reached
+                    # the ready state. Reject that half-connected client here so the
+                    # first execute does not fail with a misleading closed-socket
+                    # traceback.
+                    if not candidate._manager.client.channels_running:
+                        raise _KernelWebSocketNotReady(
+                            "Kernel WebSocket channels did not become ready."
+                        )
+
+                    self._kernel_client = candidate
                     self._apply_ws_hook()
 
                     # Capture IDs if we started fresh
-                    if not self.kernel_id and self._kernel_client.id:
-                        self.kernel_id = self._kernel_client.id
-                        if self.on_kernel_started:
-                            self.on_kernel_started(self.kernel_id)
-
                     if (
                         not self.session_id
                         and self._kernel_client._manager.client.session.session
@@ -139,21 +152,41 @@ class ColabRuntime:
                 except (
                     requests.exceptions.ReadTimeout,
                     requests.exceptions.ConnectTimeout,
+                    _KernelWebSocketNotReady,
                 ) as e:
                     last_err = e
+                    self._discard_candidate(candidate)
                     if i < retries - 1:
                         sleep_time = backoff ** (i + 1)
                         logging.debug(
-                            f"Kernel startup timeout, retrying in {sleep_time}s..."
+                            f"Kernel connection failed, retrying in {sleep_time}s..."
                             f" ({i + 1}/{retries})"
                         )
                         time.sleep(sleep_time)
                     else:
                         raise last_err
-                except Exception as e:
-                    raise e
+                except Exception:
+                    self._discard_candidate(candidate)
+                    raise
 
         return self._kernel_client
+
+    def _remember_kernel_id(self, candidate) -> None:
+        candidate_id = getattr(candidate, "id", None)
+        if not self.kernel_id and candidate_id:
+            self.kernel_id = candidate_id
+            if self.on_kernel_started:
+                self.on_kernel_started(self.kernel_id)
+
+    def _discard_candidate(self, candidate) -> None:
+        if candidate is None:
+            return
+        if self._kernel_client is candidate:
+            self._kernel_client = None
+        try:
+            candidate.stop(shutdown_kernel=False)
+        except Exception as e:
+            logging.debug("Error closing failed kernel connection: %s", e)
 
     def restart(
         self,

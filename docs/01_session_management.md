@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-19: Made `colab new` transactional after assignment. Existing local session names are rejected before any backend call. Once `assign` succeeds, failures while building state, persisting it, spawning keep-alive, or writing history stop the newly spawned daemon when present, remove partial local state, and unassign the owned endpoint while preserving the original exception. This prevents automation failures from silently leaving a CPU or accelerator assignment running.
 2026-06-15: Switched the keep-alive daemon from the `colab.pa.googleapis.com` `RuntimeService/KeepAliveAssignment` RPC to a Tunnel Frontend HTTP ping (`GET /tun/m/<endpoint>/keep-alive/` with `X-Colab-Tunnel: Google`) on `colab.research.google.com`. The RPC required `serviceusage` consumer access to Colab's internal project `1014160490159`, which ordinary user accounts lack, so every external user hit HTTP 403 `USER_PROJECT_DENIED` and their CLI sessions were idle-pruned within minutes (issue #14). Reproduced live with a third-party account; verified the tunnel ping is accepted by the same bearer-token credential that already works for `assign`. A `ReadTimeout` on the ping is treated as success (TFE records activity before forwarding to the often-non-responding VM). Generalized the pre-flight remediation messaging away from the now-irrelevant `colaboratory`/`pa.googleapis.com` framing, and removed the dead grpc-web client-registry/API-key code.
 2026-06-10: Replaced the POSIX-only `fcntl.flock` file locking in `_LockedFileStore` with the cross-platform `filelock` library (reported broken on Windows). Reads use `ReadWriteLock.read_lock()` (shared) and writes use `write_lock()` (exclusive), preserving the original `LOCK_SH`/`LOCK_EX` semantics. The lock is constructed with `is_singleton=False` so two `StateStore` instances for the same path in one process don't collapse into a single reentrant lock (which would raise `RuntimeError` on multi-threaded write contention). Added shared-read, cross-process exclusion, and multi-thread/multi-process regression tests.
 ---
@@ -49,6 +50,7 @@ The CLI maps user flags to these backend parameters:
     - `accelerator`: Selected from the list above.
 - **State Persistence**: The response contains a `token` and potentially a backend URL or identifier. We will store this in a local JSON file (default `~/.config/colab-cli/sessions.json`).
     - Format: `{ "session_name": { "token": "...", "backend_url": "...", "hardware": "..." } }`
+- **Ownership and rollback**: A requested name that already exists in local state is rejected before assignment. After a successful assignment, local initialization is a transaction: state persistence, keep-alive startup, and history recording must all complete. Any failure stops the newly created daemon when applicable, removes partial state, and unassigns that endpoint without replacing the original exception.
 
 ### 2. Session Status (`colab status`)
 - **API**: `/api/sessions` or querying the kernel for resource usage via a special "status" message.
@@ -108,6 +110,9 @@ TDD is mandatory for all session management features.
 - **Test Case**: Verify `colab new` correctly parses a `PostAssignmentResponse` and stores it in the local `StateStore`.
 - **Test Case**: Verify `colab stop` sends a `POST` request with the correct XSRF token to the unassign endpoint.
 - **Test Case**: Verify that the path provided via `-c` is correctly passed to the authentication flow.
+- **Test Case**: Verify an existing session name is rejected before `assign`.
+- **Test Case**: Verify failures during initial state persistence unassign the new endpoint.
+- **Test Case**: Verify failures after keep-alive startup terminate the daemon, remove state, and unassign the endpoint.
 - **Mocking**: Use `unittest.mock` to intercept `requests.Session.request` and return simulated XSSI-prefixed JSON payloads matching the HAR traces.
 
 ### 2. State Store Validation

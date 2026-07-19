@@ -39,6 +39,7 @@ def test_session_state_with_pid():
 @patch("colab_cli.commands.session.spawn_keep_alive")
 def test_new_spawns_keep_alive(mock_spawn, mock_common_state):
     # mock_common_state is automatically provided by conftest.py
+    mock_common_state.store.get.return_value = None
     mock_common_state.client.assign.return_value = MagicMock(
         endpoint="e1", runtime_proxy_info=MagicMock(token="t1", url="u1")
     )
@@ -58,6 +59,59 @@ def test_new_spawns_keep_alive(mock_spawn, mock_common_state):
     assert mock_common_state.store.add.called
     state_saved = mock_common_state.store.add.call_args[0][0]
     assert state_saved.keep_alive_pid == 9999
+
+
+def test_new_rejects_existing_session_name_before_assignment(mock_common_state):
+    mock_common_state.store.get.return_value = SessionState(
+        name="test-sess",
+        token="existing-token",
+        url="existing-url",
+        endpoint="existing-endpoint",
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        new(session="test-sess")
+
+    assert exc_info.value.exit_code == 1
+    mock_common_state.client.assign.assert_not_called()
+
+
+@patch("colab_cli.commands.session.spawn_keep_alive")
+def test_new_rolls_back_assignment_when_initial_state_write_fails(
+    mock_spawn, mock_common_state
+):
+    mock_common_state.store.get.return_value = None
+    mock_common_state.client.assign.return_value = MagicMock(
+        endpoint="e1", runtime_proxy_info=MagicMock(token="t1", url="u1")
+    )
+    mock_common_state.store.add.side_effect = OSError("state write failed")
+
+    with pytest.raises(OSError, match="state write failed"):
+        new(session="test-sess")
+
+    mock_spawn.assert_not_called()
+    mock_common_state.store.remove.assert_called_once_with("test-sess")
+    mock_common_state.client.unassign.assert_called_once_with("e1")
+
+
+@patch("colab_cli.common.kill_process")
+@patch("colab_cli.commands.session.spawn_keep_alive", return_value=9999)
+def test_new_rolls_back_daemon_state_and_assignment_when_history_write_fails(
+    mock_spawn, mock_kill_process, mock_common_state
+):
+    mock_common_state.store.get.return_value = None
+    mock_common_state.client.assign.return_value = MagicMock(
+        endpoint="e1", runtime_proxy_info=MagicMock(token="t1", url="u1")
+    )
+    mock_common_state.history.log_event.side_effect = OSError("history write failed")
+
+    with pytest.raises(OSError, match="history write failed"):
+        new(session="test-sess")
+
+    mock_spawn.assert_called_once()
+    mock_kill_process.assert_called_once_with(9999)
+    mock_common_state.store.remove.assert_called_once_with("test-sess")
+    mock_common_state.client.unassign.assert_called_once_with("e1")
 
 
 def test_spawn_keep_alive_command_includes_auth_flag(mocker):
@@ -129,6 +183,7 @@ def test_new_runs_keep_alive_preflight(mock_spawn, mock_common_state):
     """`colab new` should pre-flight the keep-alive RPC before persisting the
     session, so missing-scope failures are surfaced immediately rather than
     silently after ~2 minutes."""
+    mock_common_state.store.get.return_value = None
     mock_common_state.client.assign.return_value = MagicMock(
         endpoint="e1", runtime_proxy_info=MagicMock(token="t1", url="u1")
     )
@@ -147,6 +202,7 @@ def test_new_aborts_on_missing_scope(mock_spawn, mock_common_state):
     - exit non-zero,
     - and NOT spawn the keep-alive daemon or persist the session.
     """
+    mock_common_state.store.get.return_value = None
     mock_common_state.client.assign.return_value = MagicMock(
         endpoint="e1", runtime_proxy_info=MagicMock(token="t1", url="u1")
     )
@@ -183,6 +239,7 @@ def test_new_tolerates_non_scope_preflight_error(mock_spawn, mock_common_state):
     pre-flight should NOT block session creation — the daemon will retry and
     log via the existing keep_alive_error path.
     """
+    mock_common_state.store.get.return_value = None
     mock_common_state.client.assign.return_value = MagicMock(
         endpoint="e1", runtime_proxy_info=MagicMock(token="t1", url="u1")
     )
