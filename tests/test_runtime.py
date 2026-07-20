@@ -192,25 +192,87 @@ def test_colab_runtime_stop_exception(caplog):
     assert "Error stopping kernel client" in caplog.text
 
 
-def test_colab_runtime_stdin_logging():
-    mock_history = MagicMock()
+def _stdin_runtime(history=None):
     runtime = ColabRuntime(
-        "http://url", "token", session_name="test-s", history=mock_history
+        "http://url", "token", session_name="test-s", history=history
     )
-    mock_kc = MagicMock()
-    runtime._kernel_client = mock_kc
+    kernel_client = MagicMock()
+    kernel_client._manager.client.input = MagicMock()
+    runtime._kernel_client = kernel_client
+    return runtime, kernel_client
 
-    mock_kc.execute.side_effect = lambda code, allow_stdin=False, stdin_hook=None: {
-        "outputs": [{"text": stdin_hook("Enter something: ")}]
-    }
+
+def _execute_with_stdin_request(request):
+    def execute(code, allow_stdin=False, stdin_hook=None, **kwargs):
+        assert allow_stdin is True
+        assert stdin_hook is not None
+        stdin_hook(request)
+        return {"outputs": []}
+
+    return execute
+
+
+def test_colab_runtime_sends_canonical_input_reply_and_logs_plain_value():
+    history = MagicMock()
+    runtime, kernel_client = _stdin_runtime(history)
+    request = {"content": {"prompt": "Enter something: ", "password": False}}
+    kernel_client.execute.side_effect = _execute_with_stdin_request(request)
 
     with patch("colab_cli.runtime.input", return_value="user input"):
-        outputs = runtime.execute_code("code", allow_stdin=True)
+        assert runtime.execute_code("code", allow_stdin=True) == []
 
-    assert outputs == [{"text": "user input"}]
-    mock_history.log_event.assert_any_call(
-        "test-s", "stdin_request", {"prompt": "Enter something: "}
+    kernel_client._manager.client.input.assert_called_once_with("user input")
+    history.log_event.assert_any_call(
+        "test-s", "stdin_request", {"prompt": "Enter something: ", "password": False}
     )
-    mock_history.log_event.assert_any_call(
-        "test-s", "input_reply", {"value": "user input"}
+    history.log_event.assert_any_call(
+        "test-s", "input_reply", {"value": "user input", "password": False}
     )
+
+
+def test_colab_runtime_uses_getpass_and_redacts_password_history():
+    history = MagicMock()
+    runtime, kernel_client = _stdin_runtime(history)
+    request = {"content": {"prompt": "Password: ", "password": True}}
+    kernel_client.execute.side_effect = _execute_with_stdin_request(request)
+
+    with patch("colab_cli.runtime.getpass", return_value="super-secret"):
+        runtime.execute_code("code", allow_stdin=True)
+
+    kernel_client._manager.client.input.assert_called_once_with("super-secret")
+    history.log_event.assert_any_call(
+        "test-s", "input_reply", {"value": "<redacted>", "password": True}
+    )
+    assert "super-secret" not in repr(history.log_event.call_args_list)
+
+
+def test_colab_runtime_custom_stdin_hook_receives_request_and_none_becomes_empty():
+    runtime, kernel_client = _stdin_runtime()
+    request = {"content": {"prompt": "Continue? ", "password": False}}
+    kernel_client.execute.side_effect = _execute_with_stdin_request(request)
+    hook = MagicMock(return_value=None)
+
+    runtime.execute_code("code", allow_stdin=True, stdin_hook=hook)
+
+    hook.assert_called_once_with(request)
+    kernel_client._manager.client.input.assert_called_once_with("")
+
+
+def test_colab_runtime_missing_input_reply_api_fails_explicitly():
+    runtime, kernel_client = _stdin_runtime()
+    kernel_client._manager.client.input = None
+    request = {"content": {"prompt": "Value: ", "password": False}}
+    kernel_client.execute.side_effect = _execute_with_stdin_request(request)
+
+    with patch("colab_cli.runtime.input", return_value="value"):
+        with pytest.raises(RuntimeError, match="does not expose input_reply"):
+            runtime.execute_code("code", allow_stdin=True)
+
+
+def test_colab_runtime_rejects_invalid_timeout_before_connecting():
+    runtime = ColabRuntime("http://url", "token")
+
+    with pytest.raises(ValueError, match="finite number greater than zero"):
+        runtime.execute_code("pass", timeout=0)
+
+    assert runtime._kernel_client is None

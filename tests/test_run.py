@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 from colab_cli.cli import app
 from colab_cli.client import (
     Accelerator,
+    ColabRequestError,
     PostAssignmentResponse,
     Variant,
 )
@@ -38,6 +39,7 @@ def mock_client(mock_common_state):
 
 @pytest.fixture
 def mock_store(mock_common_state):
+    mock_common_state.store.get.return_value = None
     return mock_common_state.store
 
 
@@ -529,3 +531,191 @@ def test_run_with_timeout_flag(
     code_calls = mock_runtime.execute_code.call_args_list
     body_call = next(c for c in code_calls if "hello from script" in c.args[0])
     assert body_call.kwargs.get("timeout") == 3600.0
+
+
+def _persist_run_session(mock_store):
+    persisted = {}
+    mock_store.add.side_effect = lambda state: persisted.__setitem__("s", state)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+    return persisted
+
+
+def _assignment_error(status, reason="Error"):
+    response = MagicMock(status_code=status, reason=reason)
+    return ColabRequestError(
+        "assignment failed", request=MagicMock(), response=response
+    )
+
+
+def test_run_invalid_gpu_fails_before_assign(mock_client, script_path):
+    result = runner.invoke(app, ["run", "--gpu", "T44", str(script_path)])
+    assert result.exit_code == 2
+    assert "Unsupported GPU" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_run_gpu_and_tpu_fail_before_assign(mock_client, script_path):
+    result = runner.invoke(
+        app, ["run", "--gpu", "T4", "--tpu", "v5e1", str(script_path)]
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_run_invalid_timeout_fails_before_assign(mock_client, script_path):
+    result = runner.invoke(app, ["run", "--timeout", "0", str(script_path)])
+    assert result.exit_code == 2
+    assert "finite number greater than zero" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_run_http_412_is_concise_and_not_mislabelled(
+    mock_client, mock_store, script_path
+):
+    mock_client.assign.side_effect = _assignment_error(412, "Precondition Failed")
+    result = runner.invoke(app, ["run", "--gpu", "T4", str(script_path)])
+    assert result.exit_code == 1
+    assert "HTTP 412" in result.stderr
+    assert "does not reliably mean too many" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_run_body_timeout_returns_124_and_releases_ephemeral_runtime(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    runtime = mock_runtime_class.return_value
+    runtime.execute_code.side_effect = [[], TimeoutError("Timeout waiting for output")]
+    _persist_run_session(mock_store)
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 124
+    assert "cleanup will attempt to release" in result.stderr
+    mock_client.unassign.assert_called_once_with("ep-123")
+    assert runtime.stop.call_count == 2
+    runtime.stop.assert_any_call()
+    runtime.stop.assert_any_call(shutdown_kernel=True)
+
+
+def test_run_body_timeout_with_keep_returns_124_without_unassign(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    runtime = mock_runtime_class.return_value
+    runtime.execute_code.side_effect = [[], TimeoutError("Timeout waiting for output")]
+    _persist_run_session(mock_store)
+    result = runner.invoke(app, ["run", "--keep", str(script_path)])
+    assert result.exit_code == 124
+    assert "remote kernel may still be running" in result.stderr
+    mock_client.unassign.assert_not_called()
+    runtime.stop.assert_called_once_with()
+
+
+def test_run_prelude_timeout_returns_124_and_releases_ephemeral_runtime(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    runtime = mock_runtime_class.return_value
+    runtime.execute_code.side_effect = TimeoutError("Timeout waiting for output")
+    _persist_run_session(mock_store)
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 124
+    mock_client.unassign.assert_called_once_with("ep-123")
+    assert runtime.stop.call_count == 2
+    runtime.stop.assert_any_call()
+    runtime.stop.assert_any_call(shutdown_kernel=True)
+
+
+def test_run_existing_session_name_fails_before_assign(
+    mock_client, mock_store, script_path
+):
+    mock_store.get.return_value = MagicMock()
+
+    result = runner.invoke(app, ["run", "-s", "existing", str(script_path)])
+
+    assert result.exit_code == 1
+    assert "already exists" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_run_spawn_failure_rolls_back_new_assignment(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    mock_spawn_keep_alive.side_effect = RuntimeError("spawn failed")
+
+    result = runner.invoke(app, ["run", "-s", "spawn-fails", str(script_path)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+    mock_store.remove.assert_called_once_with("spawn-fails")
+    mock_client.unassign.assert_called_once_with("ep-123")
+    mock_runtime_class.assert_not_called()
+
+
+def test_run_history_failure_stops_keepalive_and_rolls_back(
+    mocker,
+    mock_common_state,
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    mock_common_state.history.log_event.side_effect = RuntimeError("history failed")
+    kill_process = mocker.patch("colab_cli.common.kill_process")
+
+    result = runner.invoke(app, ["run", "-s", "history-fails", str(script_path)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+    kill_process.assert_called_once_with(12345)
+    mock_store.remove.assert_called_once_with("history-fails")
+    mock_client.unassign.assert_called_once_with("ep-123")
+    mock_runtime_class.assert_not_called()
+
+
+def test_run_teardown_unassign_failure_retains_state(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    mock_client.unassign.side_effect = RuntimeError("release ambiguous")
+    runtime = mock_runtime_class.return_value
+    runtime.execute_code.return_value = []
+    _persist_run_session(mock_store)
+
+    result = runner.invoke(app, ["run", "-s", "retain-run", str(script_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "release could not be confirmed" in result.stderr
+    retained = mock_store.add.call_args.args[0]
+    assert retained.name == "retain-run"
+    assert retained.running is None
+    mock_store.remove.assert_not_called()

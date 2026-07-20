@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 
 from colab_cli.auth import (
+    DEFAULT_AUTH_PROVIDER,
     REMOTE_REDIRECT_URI,
     TOKEN_CONFIG_PATH,
     AuthProvider,
@@ -156,3 +157,7 @@ def test_get_credentials_fallback_config(mock_deps):
     m_file.read_text.assert_called_once()
     mock_deps["creds_cls"].from_authorized_user_file.assert_called_once()
     assert res == mock_deps["session"].return_value
+
+
+def test_default_auth_provider_is_public_oauth():
+    assert DEFAULT_AUTH_PROVIDER is AuthProvider.OAUTH2

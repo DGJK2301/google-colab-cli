@@ -56,7 +56,8 @@ def test_cli_exec_file(mock_store, mock_runtime_class, mock_common_state, tmp_pa
     assert mock_session.last_execution[2] is not None
     mock_store.add.assert_called_with(mock_session)
     mock_runtime.execute_code.assert_any_call(
-        "import os; os.makedirs('/content', exist_ok=True); os.chdir('/content')"
+        "import os; os.makedirs('/content', exist_ok=True); os.chdir('/content')",
+        timeout=30.0,
     )
     mock_runtime.execute_code.assert_any_call(
         "print('hello')", output_hook=ANY, timeout=30.0
@@ -262,3 +263,60 @@ def test_cli_exec_timeout(mock_store, mock_runtime_class, mock_common_state, tmp
     mock_runtime.execute_code.assert_any_call(
         "print('hello')", output_hook=ANY, timeout=3600.0
     )
+
+
+def _exec_session(mock_store, mock_common_state):
+    session = MagicMock()
+    session.url = "http://url"
+    session.token = "token"
+    session.name = "s1"
+    session.kernel_id = None
+    session.session_id = None
+    mock_store.get.return_value = session
+    mock_common_state.resolve_session.return_value = "s1"
+    return session
+
+
+def test_cli_exec_rejects_invalid_timeout_before_session_resolution(
+    mock_runtime_class, mock_common_state
+):
+    result = runner.invoke(
+        app, ["exec", "-s", "s1", "--timeout", "0"], input="print(1)"
+    )
+    assert result.exit_code == 2
+    assert "finite number greater than zero" in result.stderr
+    mock_common_state.resolve_session.assert_not_called()
+    mock_runtime_class.assert_not_called()
+
+
+def test_cli_exec_prelude_timeout_returns_124(
+    mock_store, mock_runtime_class, mock_common_state
+):
+    _exec_session(mock_store, mock_common_state)
+    runtime = mock_runtime_class.return_value
+    runtime.execute_code.side_effect = TimeoutError("Timeout waiting for output")
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
+    assert result.exit_code == 124
+    assert "remote kernel may still be running" in result.stderr
+    mock_common_state.history.log_event.assert_any_call(
+        "s1", "execution_timeout", {"phase": "prelude", "timeout": 30.0}
+    )
+    runtime.stop.assert_called_once_with()
+
+
+def test_cli_exec_body_timeout_returns_124_and_clears_running_state(
+    mock_store, mock_runtime_class, mock_common_state
+):
+    session = _exec_session(mock_store, mock_common_state)
+    runtime = mock_runtime_class.return_value
+    runtime.execute_code.side_effect = [[], TimeoutError("Timeout waiting for output")]
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
+    assert result.exit_code == 124
+    assert "remote kernel may still be running" in result.stderr
+    assert session.running is None
+    mock_common_state.history.log_event.assert_any_call(
+        "s1",
+        "execution_timeout",
+        {"phase": "body", "timeout": 30.0, "cell_index": None, "cell_id": None},
+    )
+    runtime.stop.assert_called_once_with()

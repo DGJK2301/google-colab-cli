@@ -16,7 +16,16 @@ import uuid
 import json
 import pytest
 from unittest.mock import MagicMock
-from colab_cli.client import Client, Prod, PostAssignmentResponse, Assignment
+from colab_cli.client import (
+    Assignment,
+    Client,
+    ColabRequestError,
+    GetAssignmentResponse,
+    PostAssignmentResponse,
+    Prod,
+    TooManyAssignmentsError,
+    Variant,
+)
 
 
 @pytest.fixture
@@ -234,3 +243,26 @@ def test_client_keep_alive_assignment_propagates_http_error(client, mock_session
 
     with pytest.raises(ColabRequestError):
         client.keep_alive_assignment("m-s-test-endpoint")
+
+
+def test_client_assign_preserves_legacy_412_type_and_http_evidence(client, mocker):
+    pending = GetAssignmentResponse(
+        acc="T4", nbh="notebook", token="xsrf", variant=Variant.GPU
+    )
+    mocker.patch.object(client, "_get_assignment", return_value=pending)
+    response = MagicMock(status_code=412, reason="Precondition Failed")
+    error = ColabRequestError(
+        "assignment failed",
+        request=MagicMock(),
+        response=response,
+        response_body="usage limit",
+    )
+    mocker.patch.object(client, "_post_assignment", side_effect=error)
+
+    with pytest.raises(TooManyAssignmentsError) as raised:
+        client.assign(uuid.uuid4(), variant=Variant.GPU)
+
+    assert isinstance(raised.value, ColabRequestError)
+    assert raised.value.response is response
+    assert raised.value.response_body == "usage limit"
+    assert raised.value.__cause__ is error

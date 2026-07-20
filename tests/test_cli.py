@@ -630,3 +630,51 @@ def test_cli_new_non_400_error_propagates(mock_client, mock_store):
     # Should not present the 400-specific friendly text
     assert "quota" not in result.output.lower()
     mock_store.add.assert_not_called()
+
+
+def _cli_assignment_error(status, reason="Error"):
+    response = MagicMock(status_code=status, reason=reason)
+    return ColabRequestError(
+        "assignment failed", request=MagicMock(), response=response
+    )
+
+
+def test_cli_new_invalid_gpu_fails_before_assign(mock_client, mock_store):
+    result = runner.invoke(app, ["new", "-s", "bad", "--gpu", "T44"])
+    assert result.exit_code == 2
+    assert "Unsupported GPU" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_cli_new_gpu_and_tpu_fail_before_assign(mock_client, mock_store):
+    result = runner.invoke(app, ["new", "-s", "bad", "--gpu", "T4", "--tpu", "v5e1"])
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_cli_new_http_412_has_honest_message(mock_client, mock_store):
+    mock_client.assign.side_effect = _cli_assignment_error(412, "Precondition Failed")
+    result = runner.invoke(app, ["new", "-s", "gpu", "--gpu", "T4"])
+    assert result.exit_code == 1
+    assert "HTTP 412" in result.stderr
+    assert "does not reliably mean too many" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_new_http_503_is_retryable_capacity_message(mock_client, mock_store):
+    mock_client.assign.side_effect = _cli_assignment_error(503, "Service Unavailable")
+    result = runner.invoke(app, ["new", "-s", "gpu", "--gpu", "G4"])
+    assert result.exit_code == 1
+    assert "temporarily unavailable" in result.stderr
+    assert "bounded backoff" in result.stderr
+
+
+def test_cli_auth_default_matches_public_oauth_contract():
+    import inspect
+
+    from colab_cli.auth import AuthProvider
+    from colab_cli.cli import callback
+
+    default = inspect.signature(callback).parameters["auth"].default
+    assert default is AuthProvider.OAUTH2

@@ -38,41 +38,26 @@ from typing import List, Optional
 import typer
 from typing_extensions import Annotated
 
-from colab_cli.client import (
-    Accelerator,
-    ColabRequestError,
-    PostAssignmentResponse,
-    Variant,
+from colab_cli.accelerators import (
+    AcceleratorArgumentError,
+    format_assignment_error,
+    resolve_accelerator,
 )
+from colab_cli.client import ColabRequestError, PostAssignmentResponse
 from colab_cli.commands.session import (
     _is_scope_error,
+    _rollback_allocated_session,
     _scope_remediation_message,
     spawn_keep_alive,
 )
 from colab_cli.runtime import ColabRuntime
 from colab_cli.state import SessionState
+from colab_cli.timeouts import (
+    TIMEOUT_EXIT_CODE,
+    format_execution_timeout,
+    validate_execution_timeout,
+)
 from colab_cli.utils import get_status_code, is_terminal_error
-
-
-# TODO(sethtroisi): dedupe this logic with similar in session.py
-def _resolve_accelerator(gpu: Optional[str], tpu: Optional[str]):
-    """Mirror the mapping logic in `commands.session.new`. Centralised so the
-    two commands stay in lock-step on supported accelerator names.
-    """
-    if tpu:
-        variant = Variant.TPU
-        accelerator = Accelerator.V5E1 if tpu.lower() == "v5e1" else Accelerator.V6E1
-        return variant, accelerator
-    if gpu:
-        mapping = {
-            "a100": Accelerator.A100,
-            "h100": Accelerator.H100,
-            "l4": Accelerator.L4,
-            "t4": Accelerator.T4,
-            "g4": Accelerator.G4,
-        }
-        return Variant.GPU, mapping.get(gpu.lower(), Accelerator.A100)
-    return Variant.DEFAULT, Accelerator.NONE
 
 
 def _build_script_payload(script_path: str, script_args: List[str]) -> str:
@@ -251,94 +236,105 @@ def run_command(
 
     script_args = script_args or []
 
+    try:
+        timeout = validate_execution_timeout(timeout)
+    except ValueError as error:
+        typer.echo(f"[colab] {error}", err=True)
+        raise typer.Exit(code=2) from error
+
     # AGENTS.md item 10: validate locally BEFORE allocating a VM. A typo'd
     # script path should not cost the user real compute.
     if not os.path.isfile(script):
         typer.echo(f"[colab] Script not found: {script}", err=True)
         raise typer.Exit(2)
 
+    try:
+        variant, accelerator = resolve_accelerator(gpu=gpu, tpu=tpu)
+    except AcceleratorArgumentError as error:
+        typer.echo(f"[colab] {error}", err=True)
+        raise typer.Exit(code=2) from error
+
     name = session or f"run-{uuid.uuid4().hex[:6]}"
-    variant, accelerator = _resolve_accelerator(gpu, tpu)
+    if state.store.get(name) is not None:
+        typer.echo(
+            f"[colab] Session '{name}' already exists. Stop it or choose a new name.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     typer.echo(f"[colab] Creating session '{name}'...", err=True)
     try:
         res = state.client.assign(
             uuid.uuid4(), variant=variant, accelerator=accelerator
         )
-    except ColabRequestError as e:
-        # Mirror `colab new`'s friendly accelerator-quota message.
-        if get_status_code(e) == 400 and accelerator != Accelerator.NONE:
-            typer.echo(
-                f"[colab] Backend rejected accelerator '{accelerator.value}'. "
-                "You may not have quota or entitlement for this accelerator on "
-                "your account. Try a different one (e.g. --gpu T4) or omit "
-                "--gpu/--tpu for a CPU runtime.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        raise
+    except ColabRequestError as error:
+        typer.echo(format_assignment_error(error, accelerator), err=True)
+        raise typer.Exit(code=1) from error
 
-    if isinstance(res, PostAssignmentResponse):
-        token = res.runtime_proxy_info.token
-        url = res.runtime_proxy_info.url
-        endpoint = res.endpoint
-    else:
-        token = (
-            res.runtime_proxy_info.token
-            if hasattr(res, "runtime_proxy_info")
-            else getattr(res, "runtime_proxy_token", "")
-        )
-        url = res.runtime_proxy_info.url if hasattr(res, "runtime_proxy_info") else ""
-        endpoint = res.endpoint
-
-    s = SessionState(
-        name=name,
-        token=token,
-        url=url,
-        endpoint=endpoint,
-        variant=variant.value,
-        accelerator=accelerator.value,
-    )
-
-    # Pre-flight keep-alive: same scope-detection dance as `colab new` so a
-    # missing OAuth scope doesn't leak a billable assignment.
+    endpoint = res.endpoint
+    s = None
     try:
-        state.client.keep_alive_assignment(endpoint)
-    except ColabRequestError as e:
-        if get_status_code(e) == 403 and _is_scope_error(e):
-            typer.echo(
-                "[colab] Keep-alive pre-flight failed: your credentials "
-                "are missing an OAuth scope required by Colab.\n",
-                err=True,
+        if isinstance(res, PostAssignmentResponse):
+            token = res.runtime_proxy_info.token
+            url = res.runtime_proxy_info.url
+        else:
+            token = (
+                res.runtime_proxy_info.token
+                if hasattr(res, "runtime_proxy_info")
+                else getattr(res, "runtime_proxy_token", "")
             )
-            typer.echo(_scope_remediation_message(state.auth_provider), err=True)
-            try:
-                state.client.unassign(endpoint)
-            except Exception:
-                pass
-            raise typer.Exit(code=1)
-        # Other failures: don't block — the daemon will retry.
+            url = (
+                res.runtime_proxy_info.url if hasattr(res, "runtime_proxy_info") else ""
+            )
 
-    # AGENTS.md item 17: persist BEFORE spawning the daemon so the daemon's
-    # initial state.store.get(name) doesn't race the parent.
-    state.store.add(s)
-    s.keep_alive_pid = spawn_keep_alive(
-        endpoint,
-        name,
-        auth_provider=state.auth_provider,
-        config_path=state.config_path,
-    )
-    state.store.add(s)
-    state.history.log_event(
-        name,
-        "session_created",
-        {
-            "endpoint": endpoint,
-            "variant": variant.value,
-            "accelerator": accelerator.value,
-            "via": "run",
-        },
-    )
+        s = SessionState(
+            name=name,
+            token=token,
+            url=url,
+            endpoint=endpoint,
+            variant=variant.value,
+            accelerator=accelerator.value,
+        )
+
+        # Pre-flight keep-alive: same scope-detection dance as `colab new` so a
+        # missing OAuth scope doesn't leak a billable assignment.
+        try:
+            state.client.keep_alive_assignment(endpoint)
+        except ColabRequestError as error:
+            if get_status_code(error) == 403 and _is_scope_error(error):
+                typer.echo(
+                    "[colab] Keep-alive pre-flight failed: your credentials "
+                    "are missing an OAuth scope required by Colab.\n",
+                    err=True,
+                )
+                typer.echo(_scope_remediation_message(state.auth_provider), err=True)
+                raise typer.Exit(code=1)
+            # Other failures do not block setup; the daemon will retry.
+
+        # Persist before spawning so the daemon's first lookup cannot race.
+        state.store.add(s)
+        s.keep_alive_pid = spawn_keep_alive(
+            endpoint,
+            name,
+            auth_provider=state.auth_provider,
+            config_path=state.config_path,
+        )
+        state.store.add(s)
+        state.history.log_event(
+            name,
+            "session_created",
+            {
+                "endpoint": endpoint,
+                "variant": variant.value,
+                "accelerator": accelerator.value,
+                "via": "run",
+            },
+        )
+    except BaseException:
+        _rollback_allocated_session(
+            state, name=name, endpoint=endpoint, session_state=s
+        )
+        raise
     typer.echo(f"[colab] Session READY ({name}). Executing {script}...", err=True)
 
     # ----- Execute the script -------------------------------------------------
@@ -367,8 +363,21 @@ def run_command(
         try:
             runtime.execute_code(
                 "import os; os.makedirs('/content', exist_ok=True); "
-                "os.chdir('/content')"
+                "os.chdir('/content')",
+                timeout=timeout,
             )
+        except TimeoutError:
+            cleanup_reason = "run_timeout"
+            state.history.log_event(
+                name,
+                "execution_timeout",
+                {"phase": "prelude", "timeout": timeout, "via": "run"},
+            )
+            typer.echo(
+                format_execution_timeout(timeout, remote_may_continue=keep),
+                err=True,
+            )
+            raise typer.Exit(code=TIMEOUT_EXIT_CODE) from None
         except Exception as e:
             if is_terminal_error(e):
                 typer.echo(
@@ -392,9 +401,19 @@ def run_command(
             outputs = runtime.execute_code(
                 payload, output_hook=_make_run_output_hook(), timeout=timeout
             )
+        except TimeoutError:
+            exit_code = TIMEOUT_EXIT_CODE
+            cleanup_reason = "run_timeout"
+            state.history.log_event(
+                name,
+                "execution_timeout",
+                {"phase": "body", "timeout": timeout, "via": "run"},
+            )
+            typer.echo(
+                format_execution_timeout(timeout, remote_may_continue=keep),
+                err=True,
+            )
         except Exception:
-            # Genuine transport-level failure. Cleanup still happens via the
-            # outer finally; surface non-zero exit so callers/CI notice.
             exit_code = 1
             cleanup_reason = "run_failed"
             raise
@@ -409,7 +428,12 @@ def run_command(
             )
     finally:
         s.running = None
-        state.store.add(s)
+        try:
+            state.store.add(s)
+        except Exception as state_error:
+            typer.echo(
+                f"[colab] Failed to persist final run state: {state_error}", err=True
+            )
         # Best-effort runtime close (keeps remote kernel alive for --keep).
         try:
             runtime.stop()
@@ -424,19 +448,15 @@ def run_command(
 
 
 def _teardown(name: str, s: SessionState, *, reason: str) -> None:
-    """Best-effort full session teardown: kill the keep-alive daemon, ask the
-    remote kernel to shut down, unassign the VM, and remove local state.
+    """Best-effort teardown that preserves evidence when release is ambiguous."""
 
-    Mirrors `commands.session.stop` but with a richer history event reason and
-    swallowing all errors (we don't want a teardown failure to mask the user's
-    exit code).
-    """
     from colab_cli.common import kill_process, state
 
     typer.echo(f"[colab] Stopping session '{name}'...", err=True)
     if s.keep_alive_pid:
         try:
             kill_process(s.keep_alive_pid)
+            s.keep_alive_pid = None
         except Exception:
             pass
 
@@ -448,13 +468,41 @@ def _teardown(name: str, s: SessionState, *, reason: str) -> None:
 
     try:
         state.client.unassign(s.endpoint)
-    except Exception:
-        pass
+    except Exception as cleanup_error:
+        # Do not erase the only local handle after an ambiguous network/backend
+        # failure. A later `colab stop` or reconciliation can retry safely.
+        s.running = None
+        try:
+            state.store.add(s)
+        except Exception as state_error:
+            typer.echo(
+                "[colab] Runtime release was not confirmed and recovery state "
+                f"could not be persisted: {state_error}. Endpoint: {s.endpoint}",
+                err=True,
+            )
+        try:
+            state.history.log_event(
+                name,
+                "session_cleanup_unconfirmed",
+                {"reason": reason, "error": str(cleanup_error)[:500]},
+            )
+        except Exception:
+            pass
+        typer.echo(
+            "[colab] Runtime release could not be confirmed; local session state "
+            f"was retained. Retry with `colab stop -s {name}`.",
+            err=True,
+        )
+        return
 
     try:
         state.store.remove(name)
-    except Exception:
-        pass
+    except Exception as state_error:
+        typer.echo(
+            "[colab] Runtime was released, but stale local state could not be "
+            f"removed: {state_error}",
+            err=True,
+        )
 
     try:
         state.history.log_event(name, "session_terminated", {"reason": reason})

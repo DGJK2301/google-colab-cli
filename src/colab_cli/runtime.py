@@ -14,10 +14,14 @@
 
 import logging
 import time
+from getpass import getpass
 from typing import Any, Callable, Dict, List, Optional
 
 import jupyter_kernel_client
 import requests
+
+from colab_cli._jupyter_compat import guard_interactive_timeout
+from colab_cli.timeouts import validate_execution_timeout
 
 
 class _KernelWebSocketNotReady(RuntimeError):
@@ -202,40 +206,56 @@ class ColabRuntime:
         output_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
         timeout: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        # ``jupyter_kernel_client`` defaults ``timeout`` to ``REQUEST_TIMEOUT``
-        # (10 seconds) on both ``execute`` and ``execute_interactive``. That
-        # value is a wall-clock budget that shrinks every time the poll loop
-        # iterates -- as long as iopub/stdin events arrive back-to-back the
-        # call survives, but a single >10s quiet stretch (e.g. a kernel
-        # blocked on ``input_request`` while the user OAuths in the browser)
-        # will raise ``TimeoutError`` even though the underlying execution is
-        # still healthy. Callers that know they need a longer ceiling can
-        # pass ``timeout=`` here; otherwise we forward whatever the upstream
-        # default is (currently 10s).
+        """Execute code with bounded waiting and canonical stdin replies.
+
+        ``timeout`` is a local wait deadline. Reaching it does not prove that
+        the remote kernel stopped; callers decide whether to preserve or
+        release the surrounding Colab session.
+        """
+
+        timeout = validate_execution_timeout(timeout)
+        kernel_client = self.kernel_client
         kwargs = {"allow_stdin": allow_stdin}
         if timeout is not None:
             kwargs["timeout"] = timeout
 
-        # Wrap stdin_hook to log inputs
         original_stdin_hook = stdin_hook
 
-        def wrapped_stdin_hook(prompt):
+        def wrapped_stdin_hook(request):
+            content = request.get("content", {}) if isinstance(request, dict) else {}
+            prompt = str(content.get("prompt", ""))
+            password = bool(content.get("password", False))
+
             if self.history and self.session_name:
                 self.history.log_event(
-                    self.session_name, "stdin_request", {"prompt": prompt}
+                    self.session_name,
+                    "stdin_request",
+                    {"prompt": prompt, "password": password},
                 )
 
-            res = original_stdin_hook(prompt) if original_stdin_hook else input(prompt)
+            if original_stdin_hook:
+                response = original_stdin_hook(request)
+            elif password:
+                response = getpass(prompt)
+            else:
+                response = input(prompt)
 
+            value = "" if response is None else str(response)
+            self._send_input_reply(kernel_client, value)
             if self.history and self.session_name:
-                self.history.log_event(self.session_name, "input_reply", {"value": res})
-            return res
+                self.history.log_event(
+                    self.session_name,
+                    "input_reply",
+                    {
+                        "value": "<redacted>" if password else value,
+                        "password": password,
+                    },
+                )
 
         if allow_stdin:
             kwargs["stdin_hook"] = wrapped_stdin_hook
 
         if output_hook:
-            # If we have an output hook, we use execute_interactive and manage buffering ourselves
             outputs = []
 
             def wrapped_output_hook(msg):
@@ -243,27 +263,25 @@ class ColabRuntime:
                     output_hook as default_output_hook,
                 )
 
-                # Update local outputs list using the default logic
                 new_indexes = default_output_hook(outputs, msg)
-                # If new outputs were added, call our streaming hook with the new data
                 if new_indexes:
                     for idx in sorted(new_indexes):
                         if idx < len(outputs):
                             output_hook(outputs[idx])
 
-            reply = self.kernel_client.execute_interactive(
-                code, output_hook=wrapped_output_hook, **kwargs
-            )
-            # execute_interactive returns the raw reply message
+            with guard_interactive_timeout(kernel_client, allow_stdin=allow_stdin):
+                reply = kernel_client.execute_interactive(
+                    code, output_hook=wrapped_output_hook, **kwargs
+                )
             reply_content = reply["content"] if reply else {"status": "error"}
         else:
-            reply = self.kernel_client.execute(code, **kwargs)
+            with guard_interactive_timeout(kernel_client, allow_stdin=allow_stdin):
+                reply = kernel_client.execute(code, **kwargs)
             if not reply:
                 return []
             outputs = reply.get("outputs", [])
             reply_content = reply
 
-        # If there's an error status but no error in outputs, synthesize one
         if reply_content.get("status") == "error":
             has_error_output = any(o.get("output_type") == "error" for o in outputs)
             if not has_error_output:
@@ -277,6 +295,25 @@ class ColabRuntime:
                 )
 
         return outputs
+
+    @staticmethod
+    def _send_input_reply(kernel_client: Any, value: str) -> None:
+        """Send one Jupyter ``input_reply`` through the transport's public API.
+
+        Queue readiness is deliberately not used as a stale-request heuristic:
+        shell and stdin queues may contain messages for other requests. Once an
+        ``input_request`` has been delivered to this hook, the protocol requires
+        exactly one reply unless the transport itself rejects the send.
+        """
+
+        manager = getattr(kernel_client, "_manager", None)
+        wsclient = getattr(manager, "client", None)
+        send_input = getattr(wsclient, "input", None)
+        if not callable(send_input):
+            raise RuntimeError(
+                "The Jupyter transport does not expose input_reply support."
+            )
+        send_input(value)
 
     def stop(self, shutdown_kernel: bool = False):
         if self._kernel_client:

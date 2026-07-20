@@ -144,8 +144,17 @@ class ColabRequestError(Exception):
         self.response_body = response_body
 
 
-class TooManyAssignmentsError(Exception):
-    pass
+class TooManyAssignmentsError(ColabRequestError):
+    """Deprecated compatibility type for an ambiguous HTTP 412 response.
+
+    The historical name is not a reliable diagnosis: HTTP 412 can represent
+    usage limits, entitlement, capacity, or assignment-count constraints. The
+    type remains raised for API compatibility, but now preserves the original
+    request, response, and response body and is also a ``ColabRequestError``.
+    """
+
+    def __init__(self, message, request=None, response=None, response_body=None):
+        super().__init__(message, request, response, response_body)
 
 
 class Client:
@@ -234,15 +243,22 @@ class Client:
             return assignment
 
         try:
-            res = self._post_assignment(
+            return self._post_assignment(
                 notebook_hash, assignment.token, variant, accelerator
             )
-        except ColabRequestError as e:
-            if get_status_code(e) == 412:
-                raise TooManyAssignmentsError(str(e))
-            raise e
+        except ColabRequestError as error:
+            if get_status_code(error) != 412:
+                raise
 
-        return res
+            # Preserve the legacy exception contract without preserving its
+            # misleading diagnosis. Command callers see the original HTTP
+            # evidence through the ColabRequestError base class.
+            raise TooManyAssignmentsError(
+                str(error),
+                request=error.request,
+                response=error.response,
+                response_body=error.response_body,
+            ) from error
 
     def _build_assign_url(
         self,

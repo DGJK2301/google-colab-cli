@@ -123,3 +123,12 @@ TDD is mandatory for all session management features.
 - **Test Case (cross-process exclusion)**: Hold the write lock from a separate process and confirm the store's in-process write blocks until release.
 - **Test Case (concurrent readers)**: Hold a read lock from a separate process and confirm the store can still complete a read concurrently.
 - **Test Case (multi-thread regression)**: Two `StateStore` instances writing from different threads must serialize without raising `RuntimeError` (guards the `is_singleton=False` choice).
+
+
+## Release identity and authentication
+
+For deterministic training control, use the exact `v0.6.0.post1` tag from
+`DGJK2301/google-colab-cli`. The release pins the Colab Jupyter transport in
+published metadata. The default CLI authentication provider is `oauth2`; use
+the global `--auth=adc` option explicitly, before the subcommand, only when ADC
+has already been configured.

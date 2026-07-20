@@ -30,7 +30,7 @@ colab run [OPTIONS] SCRIPT [SCRIPT_ARGS]...
 | `--gpu` | str | None | Same set as `colab new --gpu` (T4, L4, G4, H100, A100). |
 | `--tpu` | str | None | Same set as `colab new --tpu` (v5e1, v6e1). |
 | `--keep` | bool | False | Do **not** stop the session after the script finishes. |
-| `--timeout` | float | 30.0 | Timeout in seconds for code execution to prevent hanging on silent tasks. |
+| `--timeout` | float | 30.0 | Finite local wait deadline per kernel execution. Expiry returns 124; cleanup is attempted unless `--keep` preserves the VM. |
 
 ### Shebang usage
 With `--keep` and `--gpu` baked into the shebang line, an entire one-file workload becomes:
@@ -47,7 +47,7 @@ print(torch.cuda.get_device_name(0))
 
 ## Behavior
 
-1. **Allocate**: Creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). Session name defaults to `run-<6 hex>`.
+1. **Validate and allocate**: Validates the script path, finite timeout, and exact accelerator name before any API request. `--gpu` and `--tpu` are mutually exclusive; unknown names never fall back to a different accelerator. Then it creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). Session name defaults to `run-<6 hex>`.
 2. **Execute**: Reads the script file. Prepends a deterministic prelude that re-sets `sys.argv` and `__name__` so the script body sees the same execution context as `python script.py arg1 arg2`:
    ```python
    import sys
@@ -55,7 +55,7 @@ print(torch.cuda.get_device_name(0))
    __name__ = '__main__'
    ```
    Then executes the script body in the same kernel cell so any `if __name__ == "__main__":` guard fires.
-3. **Detect failure**: If the kernel returns any output of `output_type == "error"` (uncaught exception, syntax error, etc.) the CLI exits non-zero.
+3. **Detect failure**: If the kernel returns any output of `output_type == "error"` (uncaught exception, syntax error, etc.) the CLI exits non-zero. If the local wait expires, the CLI returns `124`. Without `--keep`, teardown attempts to release the ephemeral VM; with `--keep`, the message explicitly warns that the remote kernel may still be running.
 4. **Tear down**: In a `finally` block, unless `--keep` was passed, the CLI:
    - Sends `runtime.stop(shutdown_kernel=True)` (best-effort).
    - Calls `state.client.unassign(endpoint)` to free the billable VM.

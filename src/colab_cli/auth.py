@@ -40,6 +40,14 @@ class AuthProvider(str, enum.Enum):
     ADC = "adc"
 
 
+# Keep the public OAuth flow as the zero-configuration default. ADC remains an
+# explicit, automation-friendly option for users who have already minted the
+# required Colab scopes with gcloud. Centralising the value prevents the CLI
+# callback, detached keep-alive process, and direct ``get_credentials`` callers
+# from drifting to different defaults.
+DEFAULT_AUTH_PROVIDER = AuthProvider.OAUTH2
+
+
 # Standard Scopes for Colab and Drive (Public Auth)
 PUBLIC_SCOPES = [
     "openid",
@@ -226,7 +234,7 @@ def _get_adc_credentials() -> Credentials:
 
 def get_credentials(
     config_path: Optional[str] = None,
-    provider: AuthProvider = AuthProvider.OAUTH2,
+    provider: AuthProvider = DEFAULT_AUTH_PROVIDER,
 ) -> requests.AuthorizedSession:
     """Unified entry point for retrieving an authorized session.
 

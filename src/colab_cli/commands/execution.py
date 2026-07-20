@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import datetime
+import logging
 import nbformat
 import os
 import re
@@ -25,6 +26,11 @@ from typing import Optional
 from typing_extensions import Annotated
 
 from colab_cli.runtime import ColabRuntime
+from colab_cli.timeouts import (
+    TIMEOUT_EXIT_CODE,
+    format_execution_timeout,
+    validate_execution_timeout,
+)
 from colab_cli.utils import handle_image, is_terminal_error, render_display_data
 from colab_cli.console import connect_console
 
@@ -170,6 +176,12 @@ def exec_command(
     """Execute code in a session"""
     from colab_cli.common import state
 
+    try:
+        timeout = validate_execution_timeout(timeout)
+    except ValueError as error:
+        typer.echo(f"[colab] {error}", err=True)
+        raise typer.Exit(code=2) from error
+
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
@@ -242,16 +254,32 @@ def exec_command(
     try:
         # Ensure we are in /content which is the standard Colab working directory
         runtime.execute_code(
-            "import os; os.makedirs('/content', exist_ok=True); os.chdir('/content')"
+            "import os; os.makedirs('/content', exist_ok=True); os.chdir('/content')",
+            timeout=timeout,
         )
+    except TimeoutError:
+        try:
+            state.history.log_event(
+                name,
+                "execution_timeout",
+                {"phase": "prelude", "timeout": timeout},
+            )
+        except Exception as history_error:
+            logging.debug("Failed to record execution timeout: %s", history_error)
+        typer.echo(
+            format_execution_timeout(timeout, remote_may_continue=True), err=True
+        )
+        runtime.stop()
+        raise typer.Exit(code=TIMEOUT_EXIT_CODE) from None
     except Exception as e:
+        runtime.stop()
         if is_terminal_error(e):
             typer.echo(
                 f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up."
             )
             state.prune_session(name)
             raise typer.Exit(1)
-        raise e
+        raise
 
     try:
         is_nb = file and file.endswith(".ipynb")
@@ -281,11 +309,33 @@ def exec_command(
             )
             state.store.add(s)
 
-            outputs = runtime.execute_code(
-                code,
-                output_hook=lambda o: display_output(o, output_image),
-                timeout=timeout,
-            )
+            try:
+                outputs = runtime.execute_code(
+                    code,
+                    output_hook=lambda o: display_output(o, output_image),
+                    timeout=timeout,
+                )
+            except TimeoutError:
+                try:
+                    state.history.log_event(
+                        name,
+                        "execution_timeout",
+                        {
+                            "phase": "body",
+                            "timeout": timeout,
+                            "cell_index": i if len(code_blocks) > 1 else None,
+                            "cell_id": block.get("id"),
+                        },
+                    )
+                except Exception as history_error:
+                    logging.debug(
+                        "Failed to record execution timeout: %s", history_error
+                    )
+                typer.echo(
+                    format_execution_timeout(timeout, remote_may_continue=True),
+                    err=True,
+                )
+                raise typer.Exit(code=TIMEOUT_EXIT_CODE) from None
             if "cell" in block:
                 save_output(outputs, block["cell"])
             state.history.log_event(
@@ -308,14 +358,31 @@ def exec_command(
                 )
                 raise typer.Exit(1)
     finally:
+        primary_error_active = sys.exc_info()[0] is not None
+        cleanup_error = None
         s.running = None
-        state.store.add(s)
+        try:
+            state.store.add(s)
+        except Exception as error:
+            cleanup_error = error
+            typer.echo(
+                f"[colab] Failed to persist final session state: {error}", err=True
+            )
         runtime.stop()
         if file and file.endswith(".ipynb"):
             output_file = os.path.splitext(file)[0] + "_output.ipynb"
             typer.echo(f"[colab] Saving notebook with outputs to '{output_file}'...")
-            with open(output_file, "w", encoding="utf-8") as f:
-                nbformat.write(nb, f)
+            try:
+                with open(output_file, "w", encoding="utf-8") as f:
+                    nbformat.write(nb, f)
+            except Exception as error:
+                if not primary_error_active and cleanup_error is None:
+                    raise
+                typer.echo(
+                    f"[colab] Failed to save notebook outputs: {error}", err=True
+                )
+        if cleanup_error is not None and not primary_error_active:
+            raise cleanup_error
 
 
 def repl(

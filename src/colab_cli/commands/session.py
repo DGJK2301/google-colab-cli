@@ -21,15 +21,15 @@ from typing import Any, Dict, Optional
 import typer
 from typing_extensions import Annotated
 
-from colab_cli.client import (
-    Accelerator,
-    ColabRequestError,
-    PostAssignmentResponse,
-    Variant,
+from colab_cli.accelerators import (
+    AcceleratorArgumentError,
+    format_assignment_error,
+    resolve_accelerator,
 )
-from colab_cli.utils import get_status_code
-from colab_cli.state import SessionState
+from colab_cli.client import ColabRequestError, PostAssignmentResponse
 from colab_cli.runtime import ColabRuntime
+from colab_cli.state import SessionState
+from colab_cli.utils import get_status_code
 
 
 def _is_scope_error(e: Exception) -> bool:
@@ -112,6 +112,68 @@ def _format_session_line(
     return " | ".join(parts)
 
 
+def _rollback_allocated_session(
+    state,
+    *,
+    name: str,
+    endpoint: str,
+    session_state: Optional[SessionState],
+) -> bool:
+    """Rollback setup without discarding the only recovery handle.
+
+    Returns ``True`` only when the backend accepted the unassign request. If the
+    result is ambiguous, a usable local SessionState is retained so ``colab
+    stop -s NAME`` or a later reconciliation can retry cleanup.
+    """
+
+    if session_state is not None and session_state.keep_alive_pid:
+        try:
+            from colab_cli.common import kill_process
+
+            kill_process(session_state.keep_alive_pid)
+            session_state.keep_alive_pid = None
+        except Exception as cleanup_error:
+            typer.echo(
+                f"[colab] Failed to stop keep-alive during rollback: {cleanup_error}",
+                err=True,
+            )
+
+    try:
+        state.client.unassign(endpoint)
+    except Exception as cleanup_error:
+        typer.echo(
+            f"[colab] Could not confirm release of endpoint '{endpoint}' during "
+            f"rollback: {cleanup_error}",
+            err=True,
+        )
+        if session_state is not None:
+            session_state.running = None
+            try:
+                state.store.add(session_state)
+                typer.echo(
+                    f"[colab] Retained session '{name}' locally; retry cleanup with "
+                    f"`colab stop -s {name}`.",
+                    err=True,
+                )
+            except Exception as state_error:
+                typer.echo(
+                    "[colab] Failed to retain rollback recovery state: "
+                    f"{state_error}. Endpoint requiring manual inspection: {endpoint}",
+                    err=True,
+                )
+        return False
+
+    try:
+        state.store.remove(name)
+    except Exception as cleanup_error:
+        typer.echo(
+            "[colab] Endpoint was released, but local rollback state could not "
+            f"be removed: {cleanup_error}",
+            err=True,
+        )
+    return True
+
+
 def new(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
@@ -144,44 +206,20 @@ def new(
         )
         raise typer.Exit(code=1)
 
-    variant = Variant.DEFAULT
-    accelerator = Accelerator.NONE
-
-    if tpu:
-        variant = Variant.TPU
-        accelerator = Accelerator.V5E1 if tpu.lower() == "v5e1" else Accelerator.V6E1
-    elif gpu:
-        variant = Variant.GPU
-        mapping = {
-            "a100": Accelerator.A100,
-            "h100": Accelerator.H100,
-            "l4": Accelerator.L4,
-            "t4": Accelerator.T4,
-            "g4": Accelerator.G4,
-        }
-        accelerator = mapping.get(gpu.lower(), Accelerator.A100)
+    try:
+        variant, accelerator = resolve_accelerator(gpu=gpu, tpu=tpu)
+    except AcceleratorArgumentError as error:
+        typer.echo(f"[colab] {error}", err=True)
+        raise typer.Exit(code=2) from error
 
     typer.echo(f"[colab] Creating session '{name}'...")
     try:
         res = state.client.assign(
             uuid.uuid4(), variant=variant, accelerator=accelerator
         )
-    except ColabRequestError as e:
-        # The Colab backend returns 400 when the caller is not entitled to the
-        # requested accelerator (e.g. no A100 quota). Translate that to a
-        # friendly, actionable message instead of a raw traceback. We only
-        # interpret it this way when an accelerator was actually requested;
-        # otherwise we re-raise so the user sees the real cause.
-        if get_status_code(e) == 400 and accelerator != Accelerator.NONE:
-            typer.echo(
-                f"[colab] Backend rejected accelerator '{accelerator.value}'. "
-                "You may not have quota or entitlement for this accelerator on "
-                "your account. Try a different one (e.g. --gpu T4) or omit "
-                "--gpu/--tpu for a CPU runtime.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        raise
+    except ColabRequestError as error:
+        typer.echo(format_assignment_error(error, accelerator), err=True)
+        raise typer.Exit(code=1) from error
 
     endpoint = res.endpoint
     s = None
@@ -246,33 +284,9 @@ def new(
             },
         )
     except BaseException:
-        if s is not None and s.keep_alive_pid:
-            try:
-                from colab_cli.common import kill_process
-
-                kill_process(s.keep_alive_pid)
-            except Exception as cleanup_error:
-                typer.echo(
-                    f"[colab] Failed to stop keep-alive during rollback: "
-                    f"{cleanup_error}",
-                    err=True,
-                )
-        try:
-            state.store.remove(name)
-        except Exception as cleanup_error:
-            typer.echo(
-                f"[colab] Failed to remove session state during rollback: "
-                f"{cleanup_error}",
-                err=True,
-            )
-        try:
-            state.client.unassign(endpoint)
-        except Exception as cleanup_error:
-            typer.echo(
-                f"[colab] Failed to unassign endpoint '{endpoint}' during rollback: "
-                f"{cleanup_error}",
-                err=True,
-            )
+        _rollback_allocated_session(
+            state, name=name, endpoint=endpoint, session_state=s
+        )
         raise
 
     typer.echo("[colab] Session READY.")
@@ -427,7 +441,7 @@ def spawn_keep_alive(
           and exits with `reason=session_not_found` when the parent used
           `--config` to write to a non-default path.
     """
-    cmd = [sys.executable, "-m", "colab_cli.cli"]
+    cmd = [sys.executable, "-m", "colab_cli.entrypoint"]
     if auth_provider is not None:
         cmd.append(f"--auth={auth_provider.value}")
     if config_path is not None:
