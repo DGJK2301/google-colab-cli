@@ -17,20 +17,22 @@ repos:
   hooks:
   - id: pytest
     name: pytest
-    entry: uv run pytest
+    entry: uv run pytest tests/ -q --basetemp .pytest-tmp-precommit
     language: system
     types: [python]
     pass_filenames: false
     always_run: true
   - id: ruff-check
     name: ruff check
-    entry: uv run ruff check --force-exclude
+    entry: uv run ruff check src tests
     language: system
     types: [python]
+    pass_filenames: false
     require_serial: true
   - id: ruff-format
     name: ruff format
-    entry: uv run ruff format --force-exclude
+    entry: uv run ruff format src tests
     language: system
     types: [python]
+    pass_filenames: false
     require_serial: true

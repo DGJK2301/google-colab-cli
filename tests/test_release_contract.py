@@ -75,3 +75,12 @@ def test_default_update_source_is_the_audited_fork():
     assert DEFAULT_UPDATE_URL == (
         "https://api.github.com/repos/DGJK2301/google-colab-cli/releases/latest"
     )
+
+
+def test_precommit_gates_match_the_cross_platform_ci_scope():
+    config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+
+    assert "entry: uv run pytest tests/ -q --basetemp .pytest-tmp-precommit" in config
+    assert "entry: uv run ruff check src tests" in config
+    assert "entry: uv run ruff format src tests" in config
+    assert config.count("pass_filenames: false") == 3
