@@ -502,3 +502,26 @@ def test_new_unassign_failure_retains_local_recovery_state(mock_common_state, ca
     assert retained.name == "retain-me"
     assert retained.endpoint == "e-retain"
     mock_common_state.store.remove.assert_not_called()
+
+
+@patch("colab_cli.common.kill_process")
+def test_stop_unassign_failure_retains_state_without_stale_keep_alive_pid(
+    mock_kill_process, mock_common_state
+):
+    session = SessionState(
+        name="retain-stop",
+        token="token",
+        url="https://runtime",
+        endpoint="e-retain",
+        keep_alive_pid=9876,
+    )
+    mock_common_state.store.get.return_value = session
+    mock_common_state.client.unassign.side_effect = RuntimeError("network ambiguous")
+
+    with pytest.raises(RuntimeError, match="network ambiguous"):
+        stop(session="retain-stop")
+
+    mock_kill_process.assert_called_once_with(9876)
+    assert session.keep_alive_pid is None
+    mock_common_state.store.add.assert_called_with(session)
+    mock_common_state.store.remove.assert_not_called()

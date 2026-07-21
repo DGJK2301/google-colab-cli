@@ -641,6 +641,41 @@ def test_run_prelude_timeout_returns_124_and_releases_ephemeral_runtime(
     runtime.stop.assert_any_call(shutdown_kernel=True)
 
 
+@pytest.mark.parametrize("timeout_phase", ["prelude", "body"])
+def test_run_timeout_history_failure_preserves_timeout_exit_code(
+    timeout_phase,
+    mock_common_state,
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    runtime = mock_runtime_class.return_value
+    if timeout_phase == "prelude":
+        runtime.execute_code.side_effect = TimeoutError("Timeout waiting for output")
+    else:
+        runtime.execute_code.side_effect = [
+            [],
+            TimeoutError("Timeout waiting for output"),
+        ]
+
+    def fail_timeout_history(_session, event, _payload):
+        if event == "execution_timeout":
+            raise OSError("history unavailable")
+
+    mock_common_state.history.log_event.side_effect = fail_timeout_history
+    _persist_run_session(mock_store)
+
+    result = runner.invoke(app, ["run", str(script_path)])
+
+    assert result.exit_code == 124, result.output
+    assert "timed out" in result.stderr
+    mock_client.unassign.assert_called_once_with("ep-123")
+
+
 def test_run_existing_session_name_fails_before_assign(
     mock_client, mock_store, script_path
 ):

@@ -413,6 +413,15 @@ def stop(
         from colab_cli.common import kill_process
 
         kill_process(s.keep_alive_pid)
+        s.keep_alive_pid = None
+        try:
+            state.store.add(s)
+        except Exception as state_error:
+            typer.echo(
+                "[colab] Keep-alive stopped, but the cleared PID could not be "
+                f"persisted: {state_error}",
+                err=True,
+            )
 
     try:
         runtime = ColabRuntime(s.url, s.token, kernel_id=s.kernel_id)
@@ -420,7 +429,23 @@ def stop(
     except Exception:
         pass
 
-    state.client.unassign(s.endpoint)
+    try:
+        state.client.unassign(s.endpoint)
+    except Exception as cleanup_error:
+        try:
+            state.store.add(s)
+        except Exception as state_error:
+            typer.echo(
+                "[colab] Runtime release was not confirmed and recovery state "
+                f"could not be persisted: {state_error}. Endpoint: {s.endpoint}",
+                err=True,
+            )
+        typer.echo(
+            "[colab] Runtime release could not be confirmed; local session state "
+            f"was retained. Retry with `colab stop -s {name}`.",
+            err=True,
+        )
+        raise cleanup_error
     state.store.remove(name)
     state.history.log_event(name, "session_terminated", {"reason": "user_requested"})
     typer.echo("[colab] Session terminated.")

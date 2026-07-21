@@ -31,6 +31,7 @@ See docs/05_run_command.md for the full design.
 """
 
 import datetime
+import logging
 import os
 import uuid
 from typing import List, Optional
@@ -368,11 +369,16 @@ def run_command(
             )
         except TimeoutError:
             cleanup_reason = "run_timeout"
-            state.history.log_event(
-                name,
-                "execution_timeout",
-                {"phase": "prelude", "timeout": timeout, "via": "run"},
-            )
+            try:
+                state.history.log_event(
+                    name,
+                    "execution_timeout",
+                    {"phase": "prelude", "timeout": timeout, "via": "run"},
+                )
+            except Exception as history_error:
+                logging.debug(
+                    "Failed to record run execution timeout: %s", history_error
+                )
             typer.echo(
                 format_execution_timeout(timeout, remote_may_continue=keep),
                 err=True,
@@ -404,11 +410,16 @@ def run_command(
         except TimeoutError:
             exit_code = TIMEOUT_EXIT_CODE
             cleanup_reason = "run_timeout"
-            state.history.log_event(
-                name,
-                "execution_timeout",
-                {"phase": "body", "timeout": timeout, "via": "run"},
-            )
+            try:
+                state.history.log_event(
+                    name,
+                    "execution_timeout",
+                    {"phase": "body", "timeout": timeout, "via": "run"},
+                )
+            except Exception as history_error:
+                logging.debug(
+                    "Failed to record run execution timeout: %s", history_error
+                )
             typer.echo(
                 format_execution_timeout(timeout, remote_may_continue=keep),
                 err=True,
