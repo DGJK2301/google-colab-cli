@@ -152,7 +152,7 @@ def test_upload_file(mock_request, client, tmp_path):
             "content": expected_b64,
             "chunk": 1,
         },
-        timeout=(10.0, 60.0),
+        timeout=(60.0, 120.0),
     )
 
 
@@ -168,4 +168,21 @@ def test_upload_chunk_uses_large_file_manager_markers(mock_request, client):
     payload = mock_request.call_args.kwargs["json"]
     assert payload["content"] == base64.b64encode(b"abc").decode("ascii")
     assert payload["chunk"] == 2
-    assert mock_request.call_args.kwargs["timeout"] == (10.0, 60.0)
+    assert mock_request.call_args.kwargs["timeout"] == (60.0, 120.0)
+
+
+@patch("colab_cli.contents.requests.request")
+def test_upload_chunk_accepts_an_independent_write_timeout(mock_request, session):
+    mock_resp = MagicMock(spec=Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"type": "file", "size": 3}
+    mock_request.return_value = mock_resp
+    client = ContentsClient(
+        session,
+        request_timeout=(2.0, 3.0),
+        upload_request_timeout=(11.0, 12.0),
+    )
+
+    client.upload_chunk("content/archive.part", b"abc", chunk=1)
+
+    assert mock_request.call_args.kwargs["timeout"] == (11.0, 12.0)

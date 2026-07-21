@@ -156,6 +156,7 @@ class ColabRuntime:
                 except (
                     requests.exceptions.ReadTimeout,
                     requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ConnectionError,
                     _KernelWebSocketNotReady,
                 ) as e:
                     last_err = e
@@ -191,6 +192,13 @@ class ColabRuntime:
             candidate.stop(shutdown_kernel=False)
         except Exception as e:
             logging.debug("Error closing failed kernel connection: %s", e)
+
+    def reset_connection(self) -> None:
+        """Discard a stale transport without shutting down the remote kernel."""
+
+        candidate = self._kernel_client
+        self._kernel_client = None
+        self._discard_candidate(candidate)
 
     def restart(
         self,

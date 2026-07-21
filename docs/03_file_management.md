@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-21: Reduced the default transfer chunk to 256 KiB after a live free-CPU throughput probe showed the Colab tunnel could stall on 1 MiB request bodies. Upload body writes use a separate bounded timeout, and idempotent kernel-side file controls reconnect once after a stale transport. Finalization can reconcile a lost response by verifying an already-committed target against the requested size and SHA-256.
 2026-07-20: Replaced whole-file base64 transfer with bounded, resumable Jupyter LargeFileManager chunks. Uploads and downloads now verify SHA-256 and size before atomic replacement; request timeouts are bounded and ambiguous upload responses are reconciled against remote size. The legacy Contents API remains in use for directory listing and deletion.
 ---
 
@@ -14,7 +15,7 @@ one HTTP request.
 
 ## Upload Contract
 
-`colab upload` defaults to 1 MiB source chunks and uses Jupyter Server's
+`colab upload` defaults to 256 KiB source chunks and uses Jupyter Server's
 `LargeFileManager` protocol:
 
 1. Hash the local file without loading it into memory.
@@ -30,8 +31,13 @@ Every HTTP call has a connect/read timeout. If an upload response is lost, the
 client queries the remote temporary size: the chunk is accepted only when the
 size is exactly the before- or after-write boundary. Any other size fails.
 
+Metadata and download calls keep the shorter control timeout. Upload calls use
+a separate bounded budget because `requests` writes the JSON/base64 body before
+waiting for the response. Kernel-side stat/read/remove/finalize controls reconnect
+once after a transport failure; remote execution errors are not retried.
+
 ```bash
-colab upload -s work --chunk-size-mib 1 --resume repo.bundle content/repo.bundle
+colab upload -s work --chunk-size-mib 0.25 --resume repo.bundle content/repo.bundle
 ```
 
 `--no-resume` discards the deterministic partial file. `--no-overwrite`

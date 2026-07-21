@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The package version is derived from the git tag via `hatch-vcs`; each release
 below corresponds to a tag of the same name.
 
-## [0.6.0.post1] - 2026-07-20
+## [0.6.0.post1] - 2026-07-21
 
 ### Fixed
 
@@ -31,6 +31,12 @@ below corresponds to a tag of the same name.
   keep-alive children through the dependency-diagnostic entry point.
 - Check the audited fork's GitHub releases and install exact fork tags; never
   replace this build with the package published under the upstream PyPI name.
+- Retry only idempotent control-plane reads, reconcile lost assignment and
+  unassignment POST responses without replaying them, and provide exact
+  endpoint cleanup for an untracked server assignment.
+- Use a live-validated 256 KiB default for resumable transfers, reconnect once
+  for idempotent file controls, and reconcile an upload finalization response
+  against the destination's size and SHA-256.
 
 ### Security
 

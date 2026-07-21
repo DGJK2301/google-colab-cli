@@ -80,6 +80,9 @@ class RemoteExecutor:
     def close(self) -> None:
         self.runtime.stop()
 
+    def reconnect(self) -> None:
+        self.runtime.reset_connection()
+
 
 def open_remote_executor(session: SessionState, store, history=None) -> RemoteExecutor:
     def on_kernel_started(kernel_id: str) -> None:
@@ -106,6 +109,17 @@ def open_remote_executor(session: SessionState, store, history=None) -> RemoteEx
 class RemoteFileOps:
     def __init__(self, executor: RemoteExecutor):
         self.executor = executor
+
+    def _execute_file_json(self, code: str, *, timeout: float = 30.0) -> dict:
+        """Retry one idempotent file-control call on a stale transport."""
+
+        try:
+            return self.executor.execute_json(code, timeout=timeout)
+        except RemoteExecutionError:
+            raise
+        except Exception:
+            self.executor.reconnect()
+            return self.executor.execute_json(code, timeout=timeout)
 
     def stat_file(self, path: str, *, hash_limit: int | None = None) -> dict:
         code = f"""
@@ -137,7 +151,7 @@ else:
         'sha256': digest.hexdigest(),
     }}
 """
-        return self.executor.execute_json(code)
+        return self._execute_file_json(code)
 
     def finalize_upload(
         self,
@@ -158,11 +172,17 @@ expected_sha256 = {sha256!r}
 overwrite = {overwrite!r}
 temp_runtime_path = '/' + temp_path.lstrip('/')
 remote_runtime_path = '/' + remote_path.lstrip('/')
-if not os.path.isfile(temp_runtime_path):
+if os.path.isfile(temp_runtime_path):
+    source_runtime_path = temp_runtime_path
+elif os.path.isfile(remote_runtime_path):
+    # A lost response after os.replace() is safe to reconcile by validating
+    # the already-finalized target against the requested immutable identity.
+    source_runtime_path = remote_runtime_path
+else:
     raise FileNotFoundError(temp_runtime_path)
-actual_size = os.path.getsize(temp_runtime_path)
+actual_size = os.path.getsize(source_runtime_path)
 digest = hashlib.sha256()
-with open(temp_runtime_path, 'rb') as stream:
+with open(source_runtime_path, 'rb') as stream:
     for block in iter(lambda: stream.read(1024 * 1024), b''):
         digest.update(block)
 actual_sha256 = digest.hexdigest()
@@ -171,10 +191,11 @@ if actual_size != expected_size or actual_sha256 != expected_sha256:
         f'Upload verification failed: expected {{expected_size}}/{{expected_sha256}}, '
         f'got {{actual_size}}/{{actual_sha256}}'
     )
-if os.path.exists(remote_runtime_path) and not overwrite:
+if source_runtime_path == temp_runtime_path and os.path.exists(remote_runtime_path) and not overwrite:
     raise FileExistsError(remote_runtime_path)
 os.makedirs(os.path.dirname(remote_runtime_path) or '/', exist_ok=True)
-os.replace(temp_runtime_path, remote_runtime_path)
+if source_runtime_path == temp_runtime_path:
+    os.replace(temp_runtime_path, remote_runtime_path)
 _colab_cli_result = {{
     'exists': True,
     'path': remote_path,
@@ -182,7 +203,7 @@ _colab_cli_result = {{
     'sha256': actual_sha256,
 }}
 """
-        return self.executor.execute_json(code, timeout=120.0)
+        return self._execute_file_json(code, timeout=120.0)
 
     def remove_file(self, path: str) -> None:
         code = f"""
@@ -197,7 +218,7 @@ if os.path.exists(runtime_path):
     removed = True
 _colab_cli_result = {{'path': path, 'removed': removed}}
 """
-        self.executor.execute_json(code)
+        self._execute_file_json(code)
 
     def read_chunk(self, path: str, *, offset: int, length: int) -> bytes:
         code = f"""
@@ -219,5 +240,5 @@ _colab_cli_result = {{
     'data': base64.b64encode(data).decode('ascii'),
 }}
 """
-        result = self.executor.execute_json(code)
+        result = self._execute_file_json(code)
         return base64.b64decode(result["data"], validate=True)

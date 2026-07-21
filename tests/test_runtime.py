@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import jupyter_kernel_client
 import pytest
+import requests
 
 from colab_cli.runtime import ColabRuntime
 
@@ -72,6 +73,24 @@ def test_colab_runtime_retries_when_websocket_is_not_ready(mock_kc_cls, mock_sle
     first.stop.assert_called_once_with(shutdown_kernel=False)
     mock_sleep.assert_called_once_with(2)
     on_kernel_started.assert_called_once_with("kernel-123")
+
+
+@patch("colab_cli.runtime.time.sleep")
+@patch("colab_cli.runtime.jupyter_kernel_client.KernelClient")
+def test_colab_runtime_retries_transient_tls_connection_failure(
+    mock_kc_cls, mock_sleep
+):
+    first = MagicMock()
+    first.start.side_effect = requests.ConnectionError("TLS handshake lost")
+    second = MagicMock()
+    second.id = "kernel-after-retry"
+    second._manager.client.channels_running = True
+    mock_kc_cls.side_effect = [first, second]
+    runtime = ColabRuntime("https://runtime", "token")
+
+    assert runtime.kernel_client is second
+    first.stop.assert_called_once_with(shutdown_kernel=False)
+    mock_sleep.assert_called_once_with(2)
 
 
 @patch("colab_cli.runtime.jupyter_kernel_client.KernelClient")
@@ -190,6 +209,17 @@ def test_colab_runtime_stop_exception(caplog):
 
     runtime.stop()  # Should not raise
     assert "Error stopping kernel client" in caplog.text
+
+
+def test_colab_runtime_reset_connection_discards_cached_transport():
+    runtime = ColabRuntime("http://url", "token123")
+    client = MagicMock()
+    runtime._kernel_client = client
+
+    runtime.reset_connection()
+
+    assert runtime._kernel_client is None
+    client.stop.assert_called_once_with(shutdown_kernel=False)
 
 
 def _stdin_runtime(history=None):

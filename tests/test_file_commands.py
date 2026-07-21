@@ -56,6 +56,7 @@ def test_upload_uses_verified_transfer_and_closes_executor(
     mock_transfer_class.return_value.upload.assert_called_once_with(
         str(source), "content/repo.bundle", overwrite=True, resume=True
     )
+    assert mock_transfer_class.call_args.kwargs["chunk_size"] == 256 * 1024
     mock_open_executor.return_value.close.assert_called_once_with()
     assert "6 bytes" in result.output
     assert "sha256=abc" in result.output

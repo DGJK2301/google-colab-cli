@@ -80,6 +80,33 @@ def test_get_credentials_valid_token(mock_deps):
     assert res == mock_deps["session"].return_value
 
 
+def test_get_credentials_installs_bounded_idempotent_transport_retries(mock_deps):
+    mock_deps["exists"].side_effect = lambda path: (
+        path
+        in [
+            "dummy_config.json",
+            TOKEN_CONFIG_PATH,
+        ]
+    )
+    mock_creds = MagicMock(valid=True)
+    mock_deps["creds_cls"].from_authorized_user_file.return_value = mock_creds
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        session = get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    assert session.mount.call_count == 2
+    prefixes = [call.args[0] for call in session.mount.call_args_list]
+    assert prefixes == ["https://", "http://"]
+    adapter = session.mount.call_args_list[0].args[1]
+    retry = adapter.max_retries
+    assert retry.total == 2
+    assert retry.connect == 2
+    assert retry.read is False
+    assert retry.other == 2
+    assert retry.allowed_methods == frozenset({"GET"})
+    assert 503 in retry.status_forcelist
+
+
 def test_get_credentials_expired_token_refresh(mock_deps):
     def exists_side_effect(path):
         return path in ["dummy_config.json", TOKEN_CONFIG_PATH]

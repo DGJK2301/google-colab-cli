@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-21: Made assignment and release transactions safe under lost HTTP responses. Assignment POSTs are never replayed; the original notebook hash is queried to recover the resulting endpoint. Unassignment retries only its idempotent token GET, then confirms an ambiguous POST by checking whether the exact endpoint disappeared. `colab stop --endpoint ENDPOINT` releases a server-visible orphan that has no local session record.
 2026-07-21: Made explicit `colab stop` preserve a safe retry handle when backend release cannot be confirmed. The keep-alive PID is cleared and persisted before unassignment, so a later retry cannot target a recycled local PID; ambiguous release keeps the session record and reports the endpoint instead of claiming termination.
 2026-07-19: Made `colab new` transactional after assignment. Existing local session names are rejected before any backend call. Once `assign` succeeds, failures while building state, persisting it, spawning keep-alive, or writing history stop the newly spawned daemon when present, remove partial local state, and unassign the owned endpoint while preserving the original exception. This prevents automation failures from silently leaving a CPU or accelerator assignment running.
 2026-06-15: Switched the keep-alive daemon from the `colab.pa.googleapis.com` `RuntimeService/KeepAliveAssignment` RPC to a Tunnel Frontend HTTP ping (`GET /tun/m/<endpoint>/keep-alive/` with `X-Colab-Tunnel: Google`) on `colab.research.google.com`. The RPC required `serviceusage` consumer access to Colab's internal project `1014160490159`, which ordinary user accounts lack, so every external user hit HTTP 403 `USER_PROJECT_DENIED` and their CLI sessions were idle-pruned within minutes (issue #14). Reproduced live with a third-party account; verified the tunnel ping is accepted by the same bearer-token credential that already works for `assign`. A `ReadTimeout` on the ping is treated as success (TFE records activity before forwarding to the often-non-responding VM). Generalized the pre-flight remediation messaging away from the now-irrelevant `colaboratory`/`pa.googleapis.com` framing, and removed the dead grpc-web client-registry/API-key code.
@@ -65,7 +66,16 @@ The CLI maps user flags to these backend parameters:
 - **Parameters**:
     - `authuser`: 0.
     - `<endpoint>`: The unique session identifier returned during assignment (e.g., `tpu-v5e1-s-kkb-...`).
-- **Cleanup**: Remove the session from the local state file upon successful 204 response.
+- **Lost-response safety**: The token GET is idempotent and receives bounded
+  retries. The unassign POST is never replayed after a lost response; the
+  client reports success only after the exact endpoint disappears from the
+  server assignment list.
+- **Orphan recovery**: `colab stop --endpoint ENDPOINT` releases an exact
+  server-side assignment that has no local session record. It refuses an
+  endpoint still owned by local state so daemon and kernel cleanup cannot be
+  bypassed.
+- **Cleanup**: Remove the session from local state only after a successful
+  response or a server-side query confirms that the endpoint no longer exists.
 
 ### 4. Session Listing (`colab sessions`)
 - **API**: `GET https://colab.research.google.com/tun/m/assignments` (based on `colab-agent` implementation).

@@ -48,7 +48,7 @@ try {
         throw "CPU session allocation failed with exit code $LASTEXITCODE"
     }
 
-    & uv run colab upload --session $sessionName --chunk-size-mib 1 `
+    & uv run colab upload --session $sessionName --chunk-size-mib 0.25 `
         $sourceFile $remoteFile
     if ($LASTEXITCODE -ne 0) {
         throw "Chunked upload failed with exit code $LASTEXITCODE"
@@ -72,7 +72,7 @@ print('REMOTE_TRANSFER_SHA_OK')
         throw "Remote size/SHA verification failed"
     }
 
-    & uv run colab download --session $sessionName --chunk-size-mib 1 `
+    & uv run colab download --session $sessionName --chunk-size-mib 0.25 `
         $remoteFile $downloadFile
     if ($LASTEXITCODE -ne 0) {
         throw "Chunked download failed with exit code $LASTEXITCODE"

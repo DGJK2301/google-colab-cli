@@ -398,9 +398,50 @@ def stop(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
+    endpoint: Annotated[
+        Optional[str],
+        typer.Option(
+            "--endpoint",
+            help="Release an orphan server assignment by its exact endpoint",
+        ),
+    ] = None,
 ):
     """Stop a session"""
     from colab_cli.common import state
+
+    if session is not None and endpoint is not None:
+        typer.echo(
+            "[colab] Error: --session and --endpoint are mutually exclusive.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    if endpoint is not None:
+        local_sessions = state.store.list()
+        for local_name, local_session in local_sessions.items():
+            if local_session.endpoint == endpoint:
+                typer.echo(
+                    "[colab] Error: endpoint is tracked by local session "
+                    f"'{local_name}'. Use `colab stop -s {local_name}` so the "
+                    "kernel and keep-alive process are also cleaned up.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
+        assignments = state.client.list_assignments()
+        if endpoint not in {assignment.endpoint for assignment in assignments}:
+            typer.echo(
+                f"[colab] Error: endpoint '{endpoint}' is not active on the server.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        state.client.unassign(endpoint)
+        state.history.log_event(
+            "?", "orphan_assignment_released", {"endpoint": endpoint}
+        )
+        typer.echo(f"[colab] Orphan assignment released: {endpoint}")
+        return
 
     name = state.resolve_session(session)
     s = state.store.get(name)

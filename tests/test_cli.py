@@ -250,6 +250,50 @@ def test_cli_stop(mock_client, mock_store, mock_common_state):
     mock_store.remove.assert_called_with("s1")
 
 
+def test_cli_stop_orphan_by_exact_endpoint(mock_client, mock_store):
+    assignment = MagicMock(endpoint="orphan-ep")
+    mock_client.list_assignments.return_value = [assignment]
+    mock_store.list.return_value = {}
+
+    result = runner.invoke(app, ["stop", "--endpoint", "orphan-ep"])
+
+    assert result.exit_code == 0
+    mock_client.unassign.assert_called_once_with("orphan-ep")
+    assert "Orphan assignment released" in result.output
+
+
+def test_cli_stop_endpoint_rejects_locally_tracked_assignment(mock_client, mock_store):
+    assignment = MagicMock(endpoint="tracked-ep")
+    mock_client.list_assignments.return_value = [assignment]
+    mock_store.list.return_value = {
+        "tracked": MagicMock(name="tracked", endpoint="tracked-ep")
+    }
+
+    result = runner.invoke(app, ["stop", "--endpoint", "tracked-ep"])
+
+    assert result.exit_code == 1
+    assert "colab stop -s tracked" in result.output
+    mock_client.unassign.assert_not_called()
+
+
+def test_cli_stop_endpoint_requires_exact_server_assignment(mock_client, mock_store):
+    mock_client.list_assignments.return_value = []
+    mock_store.list.return_value = {}
+
+    result = runner.invoke(app, ["stop", "--endpoint", "missing-ep"])
+
+    assert result.exit_code == 1
+    assert "not active on the server" in result.output
+    mock_client.unassign.assert_not_called()
+
+
+def test_cli_stop_rejects_session_and_endpoint_together(mock_client, mock_store):
+    result = runner.invoke(app, ["stop", "-s", "s1", "--endpoint", "e1"])
+
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
 def test_cli_sessions_prune(mock_common_state):
     mock_assignment = MagicMock()
     mock_session_state1 = MagicMock()

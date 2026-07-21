@@ -37,7 +37,7 @@ def _progress(progress: TransferProgress) -> None:
     )
 
 
-def _open_transfer(session, state, *, chunk_size_mib: int):
+def _open_transfer(session, state, *, chunk_size_mib: float):
     if chunk_size_mib <= 0:
         typer.echo("[colab] Error: --chunk-size-mib must be positive.", err=True)
         raise typer.Exit(2)
@@ -45,7 +45,7 @@ def _open_transfer(session, state, *, chunk_size_mib: int):
     transfer = FileTransfer(
         ContentsClient(session),
         RemoteFileOps(executor),
-        chunk_size=chunk_size_mib * DEFAULT_CHUNK_SIZE,
+        chunk_size=int(chunk_size_mib * 1024 * 1024),
         progress=_progress,
     )
     return executor, transfer
@@ -114,12 +114,12 @@ def upload(
     local_path: Annotated[str, typer.Argument(help="Local file to upload")] = ...,
     remote_path: Annotated[str, typer.Argument(help="Remote path to upload to")] = ...,
     chunk_size_mib: Annotated[
-        int,
+        float,
         typer.Option(
             "--chunk-size-mib",
             help="Bounded transfer chunk size in MiB",
         ),
-    ] = 1,
+    ] = DEFAULT_CHUNK_SIZE / (1024 * 1024),
     resume: Annotated[
         bool,
         typer.Option("--resume/--no-resume", help="Resume a verified partial upload"),
@@ -181,12 +181,12 @@ def download(
         str, typer.Argument(help="Local path to save the file")
     ] = ...,
     chunk_size_mib: Annotated[
-        int,
+        float,
         typer.Option(
             "--chunk-size-mib",
             help="Bounded transfer chunk size in MiB",
         ),
-    ] = 1,
+    ] = DEFAULT_CHUNK_SIZE / (1024 * 1024),
     resume: Annotated[
         bool,
         typer.Option("--resume/--no-resume", help="Resume a verified partial download"),

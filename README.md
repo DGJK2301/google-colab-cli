@@ -79,7 +79,7 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | `colab sessions` | List all active sessions currently active on the backend |
 | `colab status [-s NAME]` | Display hardware, status, and local metadata for active sessions |
 | `colab restart-kernel [-s NAME]` | Restart the active session's Jupyter kernel |
-| `colab stop [-s NAME]` | Terminate a session VM and tear down its keep-alive daemon |
+| `colab stop [-s NAME] [--endpoint ENDPOINT]` | Terminate a tracked session, or release an exact untracked server assignment |
 | `colab url [-s NAME] [--open]` | Print or open a browser URL connecting to the active session |
 
 ### Execution
