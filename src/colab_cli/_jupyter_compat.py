@@ -38,6 +38,7 @@ class _DeadlineAwareMessageEvent:
         self._event = event
         self._wsclient = wsclient
         self._allow_stdin = allow_stdin
+        self._deadline_backlog_remaining: int | None = None
 
     def _channel_ready(self, name: str) -> bool:
         channel = getattr(self._wsclient, name, None)
@@ -51,7 +52,47 @@ class _DeadlineAwareMessageEvent:
             self._allow_stdin and self._channel_ready("stdin_channel")
         )
 
+    def _channel_backlog(self, name: str) -> int:
+        channel = getattr(self._wsclient, name, None)
+        messages = getattr(channel, "_messages", None)
+        qsize = getattr(messages, "qsize", None)
+        if callable(qsize):
+            return max(0, int(qsize()), int(self._channel_ready(name)))
+        return int(self._channel_ready(name))
+
+    def _snapshot_deadline_backlog(self) -> int:
+        backlog = self._channel_backlog("iopub_channel")
+        if self._allow_stdin:
+            backlog += self._channel_backlog("stdin_channel")
+        if backlog == 0 and self._event.is_set():
+            # Preserve one wake-up whose message may be crossing the queue
+            # boundary while the deadline is observed.
+            backlog = 1
+        return backlog
+
+    def _consume_deadline_backlog(self) -> bool:
+        if self._deadline_backlog_remaining is None:
+            self._deadline_backlog_remaining = self._snapshot_deadline_backlog()
+        if self._deadline_backlog_remaining <= 0 or not (
+            self._event.is_set() or self._message_ready()
+        ):
+            return False
+        self._deadline_backlog_remaining -= 1
+        return True
+
     def wait(self, timeout: float | None = None) -> bool:
+        # The pinned upstream loop recomputes the remaining wall-clock budget
+        # and repeatedly calls wait(0) after the deadline. Permit one already
+        # queued boundary message so an idle reply that raced the timer can be
+        # consumed, but never let a continuously non-empty queue extend the
+        # deadline indefinitely. Snapshot the finite queue depth at the first
+        # zero-timeout observation so a prequeued stream/display + idle pair
+        # can drain, while messages arriving later cannot replenish the budget.
+        if timeout is not None and timeout <= 0:
+            if self._consume_deadline_backlog():
+                return True
+            raise TimeoutError(_TIMEOUT_MESSAGE)
+
         if self._message_ready():
             return True
 
@@ -63,7 +104,9 @@ class _DeadlineAwareMessageEvent:
         # or a queued stdin/IOPub message as authoritative before declaring the
         # deadline expired. The next receive-loop iteration will drain it.
         if self._event.is_set() or self._message_ready():
-            return True
+            self._deadline_backlog_remaining = self._snapshot_deadline_backlog()
+            if self._consume_deadline_backlog():
+                return True
 
         if timeout is not None:
             raise TimeoutError(_TIMEOUT_MESSAGE)

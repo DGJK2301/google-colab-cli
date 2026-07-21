@@ -23,6 +23,15 @@ from colab_cli.state import Settings
 
 runner = CliRunner()
 
+FORK_RELEASES_API = (
+    "https://api.github.com/repos/DGJK2301/google-colab-cli/releases/latest"
+)
+FORK_INSTALL_SPEC_1_1 = "git+https://github.com/DGJK2301/google-colab-cli.git@v1.1.0"
+FORK_PIP_COMMAND_1_1 = (
+    f'pip install --force-reinstall "google-colab-cli @ {FORK_INSTALL_SPEC_1_1}"'
+)
+FORK_UV_COMMAND_1_1 = f'uv tool install --force "{FORK_INSTALL_SPEC_1_1}"'
+
 
 # ---------- Shared fixtures ----------------------------------------------
 
@@ -119,6 +128,145 @@ def test_pypi_no_upgrade(
     assert expected_message in result.output
 
 
+def test_github_release_payload_is_supported(app_version, fake_settings, mock_pypi):
+    app_version("1.0.0")
+    mock_pypi({"tag_name": "v1.1.0"})
+    fake_settings(update_url=FORK_RELEASES_API)
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0
+    assert "available: 1.1.0 (current: 1.0.0)" in result.output
+    assert FORK_INSTALL_SPEC_1_1 in result.output
+
+
+def test_legacy_upstream_update_url_migrates_to_fork(
+    app_version, fake_settings, mock_pypi
+):
+    app_version("1.0.0")
+    mock_pypi({"tag_name": "v1.0.0"})
+    settings = fake_settings(update_url="https://pypi.org/pypi/google-colab-cli/json")
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0
+    assert settings.update_url == FORK_RELEASES_API
+
+
+def test_legacy_source_cache_is_not_reinterpreted_as_a_fork_tag(
+    mocker, app_version, fake_settings, mock_pypi
+):
+    app_version("1.0.0")
+    mock_pypi({"tag_name": "v1.0.0"})
+    settings = fake_settings(
+        update_url="https://pypi.org/pypi/google-colab-cli/json",
+        latest_version="9.9.9",
+    )
+    mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
+    run = mocker.patch("colab_cli.auto_update.subprocess.run")
+
+    result = runner.invoke(app, ["update", "--install"])
+
+    assert result.exit_code == 0
+    assert settings.latest_version == "1.0.0"
+    run.assert_not_called()
+
+
+def test_legacy_source_cache_is_replaced_by_newer_fork_release(
+    mocker, app_version, fake_settings, mock_pypi
+):
+    app_version("1.0.0")
+    mock_pypi({"tag_name": "v1.1.0"})
+    settings = fake_settings(
+        update_url="https://pypi.org/pypi/google-colab-cli/json",
+        latest_version="9.9.9",
+    )
+    mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
+    mocker.patch("sys.executable", "/usr/bin/python")
+    run = mocker.patch(
+        "colab_cli.auto_update.subprocess.run",
+        return_value=mocker.Mock(returncode=0),
+    )
+
+    result = runner.invoke(app, ["update", "--install"])
+
+    assert result.exit_code == 0
+    assert settings.latest_version == "1.1.0"
+    assert run.call_args.args[0][-1] == f"google-colab-cli @ {FORK_INSTALL_SPEC_1_1}"
+
+
+def test_legacy_source_cache_is_cleared_when_fork_fetch_fails(
+    mocker, app_version, fake_settings, mock_pypi
+):
+    app_version("1.0.0")
+    mock_pypi(error=OSError("offline"))
+    settings = fake_settings(
+        update_url="https://pypi.org/pypi/google-colab-cli/json",
+        latest_version="9.9.9",
+    )
+    mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
+    run = mocker.patch("colab_cli.auto_update.subprocess.run")
+
+    result = runner.invoke(app, ["update", "--install"])
+
+    assert result.exit_code == 1
+    assert settings.latest_version is None
+    run.assert_not_called()
+
+
+def test_malformed_fork_payload_cannot_reuse_legacy_disk_cache(
+    mocker, app_version, fake_settings, mock_pypi
+):
+    app_version("1.0.0")
+    mock_pypi(["truthy", "but", "not", "an", "object"])
+    fake_settings(
+        update_url="https://pypi.org/pypi/google-colab-cli/json",
+        latest_version="9.9.9",
+    )
+    mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
+    run = mocker.patch("colab_cli.auto_update.subprocess.run")
+
+    result = runner.invoke(app, ["update", "--install"])
+
+    assert result.exit_code == 1
+    assert "No fork release was verified" in result.output
+    run.assert_not_called()
+
+
+def test_settings_save_failure_blocks_install_from_legacy_disk_cache(
+    mocker, app_version, fake_settings, mock_pypi
+):
+    app_version("1.0.0")
+    mock_pypi({"tag_name": "v1.1.0"})
+    fake_settings(
+        update_url="https://pypi.org/pypi/google-colab-cli/json",
+        latest_version="9.9.9",
+    )
+    mocker.patch("colab_cli.state.SettingsStore.save", side_effect=OSError("disk"))
+    mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
+    run = mocker.patch("colab_cli.auto_update.subprocess.run")
+
+    result = runner.invoke(app, ["update", "--install"])
+
+    assert result.exit_code == 1
+    assert "No fork release was verified" in result.output
+    run.assert_not_called()
+
+
+def test_invalid_release_tag_is_not_offered_for_install(
+    app_version, fake_settings, mock_pypi
+):
+    app_version("1.0.0")
+    mock_pypi({"tag_name": "v1.1.0;malicious"})
+    fake_settings(update_url=FORK_RELEASES_API)
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0
+    assert "available:" not in result.output
+    assert "git+https://" not in result.output
+
+
 def test_pypi_upgrade_uses_pip_hint(mocker, app_version, fake_settings, mock_pypi):
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
@@ -130,14 +278,12 @@ def test_pypi_upgrade_uses_pip_hint(mocker, app_version, fake_settings, mock_pyp
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert f"Run '{FORK_PIP_COMMAND_1_1}' to update." in result.output
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
-    idx_pip = result.output.find(
-        "Run 'pip install --upgrade google-colab-cli' to update."
-    )
+    idx_pip = result.output.find(f"Run '{FORK_PIP_COMMAND_1_1}' to update.")
     assert idx_install < idx_pip
 
 
@@ -154,12 +300,12 @@ def test_pypi_upgrade_uses_uv_hint(mocker, app_version, fake_settings, mock_pypi
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'uv tool install -U google-colab-cli' to update." in result.output
+    assert f"Run '{FORK_UV_COMMAND_1_1}' to update." in result.output
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
-    idx_uv = result.output.find("Run 'uv tool install -U google-colab-cli' to update.")
+    idx_uv = result.output.find(f"Run '{FORK_UV_COMMAND_1_1}' to update.")
     assert idx_install < idx_uv
 
 
@@ -176,14 +322,12 @@ def test_pypi_upgrade_uses_pip_hint_macos(
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert f"Run '{FORK_PIP_COMMAND_1_1}' to update." in result.output
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
-    idx_pip = result.output.find(
-        "Run 'pip install --upgrade google-colab-cli' to update."
-    )
+    idx_pip = result.output.find(f"Run '{FORK_PIP_COMMAND_1_1}' to update.")
     assert idx_install < idx_pip
 
 
@@ -202,7 +346,7 @@ def test_pypi_upgrade_uses_pip_hint_windows(
     assert (
         "You can run 'colab update --install' to upgrade in place." not in result.output
     )
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert f"Run '{FORK_PIP_COMMAND_1_1}' to update." in result.output
 
 
 def test_explicit_update_omits_disable_hint(app_version, fake_settings, mock_pypi):
@@ -467,8 +611,7 @@ def test_install_flag_default_does_not_install(
 def test_install_flag_runs_pip_install_upgrade(
     mocker, app_version, fake_settings, mock_pypi
 ):
-    """`colab update --install` shells out to `pip install -U google-colab-cli`
-    when PyPI reports a newer version."""
+    """`colab update --install` installs the exact newer audited fork tag."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
@@ -485,14 +628,20 @@ def test_install_flag_runs_pip_install_upgrade(
     args, _ = run.call_args
     # Use sys.executable to avoid PATH ambiguity / virtualenv mixups.
     cmd = args[0]
-    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "google-colab-cli"]
+    assert cmd == [
+        "/usr/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        f"google-colab-cli @ {FORK_INSTALL_SPEC_1_1}",
+    ]
 
 
 def test_install_flag_runs_uv_tool_install(
     mocker, app_version, fake_settings, mock_pypi
 ):
-    """`colab update --install` shells out to `uv tool install -U google-colab-cli`
-    when sys.executable contains '/uv/'."""
+    """A uv-managed install upgrades from the exact newer audited fork tag."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
@@ -510,7 +659,7 @@ def test_install_flag_runs_uv_tool_install(
     assert run.call_count == 1
     args, _ = run.call_args
     cmd = args[0]
-    assert cmd == ["uv", "tool", "install", "-U", "google-colab-cli"]
+    assert cmd == ["uv", "tool", "install", "--force", FORK_INSTALL_SPEC_1_1]
 
 
 def test_install_flag_errors_on_unsupported_platform(
@@ -547,7 +696,14 @@ def test_install_flag_runs_on_macos(mocker, app_version, fake_settings, mock_pyp
     assert run.call_count == 1
     args, _ = run.call_args
     cmd = args[0]
-    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "google-colab-cli"]
+    assert cmd == [
+        "/usr/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        f"google-colab-cli @ {FORK_INSTALL_SPEC_1_1}",
+    ]
 
 
 def test_install_flag_no_op_when_already_up_to_date(

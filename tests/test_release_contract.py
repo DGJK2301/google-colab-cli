@@ -15,9 +15,12 @@
 import tomllib
 from pathlib import Path
 
+from colab_cli.state import DEFAULT_UPDATE_URL, Settings
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TRANSPORT_COMMIT = "f18e982c3265df5e923aa9def101ab3fd737e139"
+FORK_RELEASE_SPEC = "git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
 
 
 def test_published_metadata_pins_transport_and_dependency_floors():
@@ -46,3 +49,29 @@ def test_lock_records_requested_and_resolved_transport_commit():
     )
     assert requested in lock
     assert requested + "#" + TRANSPORT_COMMIT in lock
+
+
+def test_windows_install_docs_are_single_line_and_pin_the_fork_release():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f'uv tool install --force "{FORK_RELEASE_SPEC}"' in readme
+    assert (
+        f'pip install --force-reinstall "google-colab-cli @ {FORK_RELEASE_SPEC}"'
+        in readme
+    )
+    install_lines = [line.rstrip() for line in readme.splitlines() if "install" in line]
+    assert all(not line.endswith("\\") for line in install_lines)
+
+
+def test_bundled_skill_describes_fail_closed_accelerators_only():
+    skill = (ROOT / "skills" / "colab-operator" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "silently falls back" not in skill
+    assert "Accelerator requests fail closed" in skill
+
+
+def test_default_update_source_is_the_audited_fork():
+    assert Settings().update_url == DEFAULT_UPDATE_URL
+    assert DEFAULT_UPDATE_URL == (
+        "https://api.github.com/repos/DGJK2301/google-colab-cli/releases/latest"
+    )

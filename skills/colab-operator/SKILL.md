@@ -10,8 +10,7 @@ Operate Google Colab environments via the `colab` CLI: provision GPU/TPU session
 ## Installation
 
 If the user does not already have the audited fork installed, pin the exact
-release: `uv tool install --force
-"git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"`.
+release: `uv tool install --force "git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"`.
 Verify `colab version` before allocating a runtime. Prefer the isolated `uv tool`
 environment over installing into an existing Jupyter/ML environment.
 
@@ -49,7 +48,7 @@ environment over installing into an existing Jupyter/ML environment.
 ### Provision
 - `colab new -s <name>` (CPU). Add `--gpu A100` or `--tpu v6e1` for accelerators. **Always pass `-s <name>`** — an omitted name is auto-generated as a random 6-hex string, which makes later commands ambiguous.
 - Supported `--gpu`: `T4`, `L4`, `G4`, `H100`, `A100`. Supported `--tpu`: `v5e1`, `v6e1`.
-- **Gotcha**: an unrecognized `--gpu` value silently falls back to **A100** (which then usually fails the next step). A `400` on `colab new` with an accelerator means no quota/entitlement for it on this account — fall back to `--gpu T4` or omit the flag for CPU.
+- An unrecognized accelerator value is rejected locally before any allocation request. A `400` on `colab new` with a valid accelerator can indicate quota, entitlement, or capacity; do not silently substitute another accelerator.
 - Accelerator availability is tier-gated; most accounts can only get CPU. Don't assume a GPU/TPU will allocate.
 
 ### Execute

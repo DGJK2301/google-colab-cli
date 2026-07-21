@@ -16,9 +16,11 @@ below corresponds to a tag of the same name.
   `f18e982c3265df5e923aa9def101ab3fd737e139`; add compatible dependency floors
   and a lazy dependency-diagnostic entry point.
 - Prevent finite quiet execution timeouts from entering a local CPU busy loop;
-  preserve queued/event-boundary messages and return shell exit code 124.
+  allow one queued/event-boundary message without permitting continuous output
+  to extend the wall-clock deadline, and return shell exit code 124.
 - Send canonical Jupyter `input_reply` messages, use `getpass` for password
-  prompts, and redact password values from history.
+  prompts, redact password values from history, and preserve the upstream
+  contract that a custom stdin hook owns its reply.
 - Reject invalid or conflicting accelerator flags before allocation instead of
   silently falling back to A100 or V6E1.
 - Preserve allocation HTTP evidence while retaining the deprecated HTTP 412
@@ -27,6 +29,8 @@ below corresponds to a tag of the same name.
   confirmed diagnosis.
 - Centralize the actual OAuth2 authentication default and route detached
   keep-alive children through the dependency-diagnostic entry point.
+- Check the audited fork's GitHub releases and install exact fork tags; never
+  replace this build with the package published under the upstream PyPI name.
 
 ### Security
 

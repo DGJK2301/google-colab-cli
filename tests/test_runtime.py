@@ -246,16 +246,30 @@ def test_colab_runtime_uses_getpass_and_redacts_password_history():
     assert "super-secret" not in repr(history.log_event.call_args_list)
 
 
-def test_colab_runtime_custom_stdin_hook_receives_request_and_none_becomes_empty():
+def test_colab_runtime_custom_stdin_hook_owns_exactly_one_reply():
     runtime, kernel_client = _stdin_runtime()
     request = {"content": {"prompt": "Continue? ", "password": False}}
     kernel_client.execute.side_effect = _execute_with_stdin_request(request)
-    hook = MagicMock(return_value=None)
+
+    def hook(message):
+        assert message is request
+        kernel_client._manager.client.input("owned-by-hook")
 
     runtime.execute_code("code", allow_stdin=True, stdin_hook=hook)
 
-    hook.assert_called_once_with(request)
-    kernel_client._manager.client.input.assert_called_once_with("")
+    kernel_client._manager.client.input.assert_called_once_with("owned-by-hook")
+
+
+def test_colab_runtime_does_not_treat_custom_hook_return_as_a_reply():
+    runtime, kernel_client = _stdin_runtime()
+    request = {"content": {"prompt": "Continue? ", "password": False}}
+    kernel_client.execute.side_effect = _execute_with_stdin_request(request)
+
+    runtime.execute_code(
+        "code", allow_stdin=True, stdin_hook=lambda _request: "not-a-reply"
+    )
+
+    kernel_client._manager.client.input.assert_not_called()
 
 
 def test_colab_runtime_missing_input_reply_api_fails_explicitly():

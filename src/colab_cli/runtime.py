@@ -234,8 +234,13 @@ class ColabRuntime:
                 )
 
             if original_stdin_hook:
-                response = original_stdin_hook(request)
-            elif password:
+                # Match the jupyter-kernel-client contract: a custom hook owns
+                # the input_reply send. Treating its return value as another
+                # reply sends a duplicate (commonly an empty string for hooks
+                # that correctly return None).
+                original_stdin_hook(request)
+                return
+            if password:
                 response = getpass(prompt)
             else:
                 response = input(prompt)

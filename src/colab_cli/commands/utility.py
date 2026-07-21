@@ -349,15 +349,15 @@ def update_command(
         typer.Option(
             "--install",
             help=(
-                "After checking, run 'pip install -U google-colab-cli' to "
-                "upgrade the CLI in place. No-op if already up to date. "
-                "Linux only."
+                "After checking the audited fork releases, install the exact "
+                "newer tag in place. No-op if already up to date. Linux and "
+                "macOS only."
             ),
         ),
     ] = False,
 ):
     """Check for latest version and print if an update is available"""
-    auto_update.check_for_updates(quiet=False)
+    verified_latest = auto_update.check_for_updates(quiet=False)
     if not install:
         return
 
@@ -368,15 +368,20 @@ def update_command(
         )
         raise typer.Exit(code=1)
 
-    # Skip the install when the current version already matches (or exceeds)
-    # the latest known version, to avoid an unnecessary subprocess call.
-    settings = state.settings_store.load()
-    if settings.latest_version and not auto_update._is_newer(
-        settings.latest_version, auto_update.get_app_version()
-    ):
+    if verified_latest is None:
+        typer.echo(
+            "[colab] No fork release was verified by this update check; "
+            "installation was not attempted.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Never consume the cross-process cache for installation. Only the version
+    # returned by this successful release check has a verified source identity.
+    if not auto_update._is_newer(verified_latest, auto_update.get_app_version()):
         return
 
-    auto_update.self_install()
+    auto_update.self_install(verified_latest)
 
 
 def _print_resource(filename: str) -> None:

@@ -24,10 +24,19 @@ from colab_cli._jupyter_compat import (
 )
 
 
-def _client(*, iopub_ready=False, stdin_ready=False):
+def _channel(ready=False, backlog=None):
+    if backlog is None:
+        backlog = int(bool(ready))
     return SimpleNamespace(
-        iopub_channel=SimpleNamespace(msg_ready=MagicMock(return_value=iopub_ready)),
-        stdin_channel=SimpleNamespace(msg_ready=MagicMock(return_value=stdin_ready)),
+        msg_ready=MagicMock(return_value=ready),
+        _messages=SimpleNamespace(qsize=MagicMock(return_value=backlog)),
+    )
+
+
+def _client(*, iopub_ready=False, stdin_ready=False, iopub_backlog=None):
+    return SimpleNamespace(
+        iopub_channel=_channel(iopub_ready, iopub_backlog),
+        stdin_channel=_channel(stdin_ready),
     )
 
 
@@ -66,6 +75,33 @@ def test_message_arriving_at_deadline_is_not_a_false_timeout():
     guarded = _DeadlineAwareMessageEvent(event, wsclient, allow_stdin=False)
 
     assert guarded.wait(timeout=0.1) is True
+
+
+def test_continuous_messages_cannot_extend_zero_timeout_forever():
+    event = MagicMock()
+    event.is_set.return_value = True
+    guarded = _DeadlineAwareMessageEvent(
+        event, _client(iopub_ready=True), allow_stdin=False
+    )
+
+    # One boundary message may be consumed to avoid a false timeout, but a
+    # continuously non-empty queue must not defeat the wall-clock deadline.
+    assert guarded.wait(timeout=0) is True
+    with pytest.raises(TimeoutError, match="Timeout waiting for output"):
+        guarded.wait(timeout=0)
+
+
+def test_finite_backlog_present_at_deadline_can_drain():
+    event = MagicMock()
+    event.is_set.return_value = True
+    wsclient = _client(iopub_ready=True, iopub_backlog=2)
+    guarded = _DeadlineAwareMessageEvent(event, wsclient, allow_stdin=False)
+
+    assert guarded.wait(timeout=0) is True
+    wsclient.iopub_channel._messages.qsize.return_value = 1
+    assert guarded.wait(timeout=0) is True
+    with pytest.raises(TimeoutError, match="Timeout waiting for output"):
+        guarded.wait(timeout=0)
 
 
 def test_event_set_at_deadline_is_not_a_false_timeout():

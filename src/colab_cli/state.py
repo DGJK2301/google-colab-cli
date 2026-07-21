@@ -22,6 +22,12 @@ import filelock
 from pydantic import BaseModel
 
 
+DEFAULT_UPDATE_URL = (
+    "https://api.github.com/repos/DGJK2301/google-colab-cli/releases/latest"
+)
+LEGACY_UPSTREAM_UPDATE_URL = "https://pypi.org/pypi/google-colab-cli/json"
+
+
 class SessionState(BaseModel):
     name: str
     token: str
@@ -37,7 +43,7 @@ class SessionState(BaseModel):
 
 
 class Settings(BaseModel):
-    update_url: str = "https://pypi.org/pypi/google-colab-cli/json"
+    update_url: str = DEFAULT_UPDATE_URL
     last_check: Optional[datetime] = None
     enable_update_check: bool = True
     # Highest version seen on the update source; cached for the banner.

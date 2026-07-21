@@ -34,12 +34,10 @@ Jupyter transport in published metadata as well as in `uv.lock`:
 
 ```bash
 # Using uv (recommended)
-uv tool install --force \
-  "git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
+uv tool install --force "git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
 
 # Using pip
-pip install --force-reinstall \
-  "google-colab-cli @ git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
+pip install --force-reinstall "google-colab-cli @ git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
 ```
 
 Do not install this release into an arbitrary shared Jupyter environment when an
