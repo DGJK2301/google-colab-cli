@@ -26,6 +26,7 @@ from colab_cli.remote import RemoteExecutor
 
 
 DEFAULT_JOB_ROOT = "/content/.colab-cli/jobs"
+DEFAULT_JOB_CONTROL_TIMEOUT = 120.0
 
 
 @dataclass(frozen=True)
@@ -77,8 +78,17 @@ class RemoteJobClient:
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._call("jobs", {"root": self.job_root})["jobs"]
 
-    def status(self, job_id: str) -> dict[str, Any]:
-        return self._call("status", {"root": self.job_root, "job_id": job_id})
+    def status(
+        self,
+        job_id: str,
+        *,
+        timeout: float = DEFAULT_JOB_CONTROL_TIMEOUT,
+    ) -> dict[str, Any]:
+        return self._call(
+            "status",
+            {"root": self.job_root, "job_id": job_id},
+            timeout=timeout,
+        )
 
     def tail(
         self,
@@ -87,6 +97,7 @@ class RemoteJobClient:
         stream: str = "stdout",
         offset: int = 0,
         max_bytes: int = 65536,
+        timeout: float = DEFAULT_JOB_CONTROL_TIMEOUT,
     ) -> JobTail:
         result = self._call(
             "tail",
@@ -97,6 +108,7 @@ class RemoteJobClient:
                 "offset": offset,
                 "max_bytes": max_bytes,
             },
+            timeout=timeout,
         )
         return JobTail(
             job_id=result["job_id"],
@@ -120,7 +132,11 @@ class RemoteJobClient:
         )
 
     def _call(
-        self, operation: str, payload: dict[str, Any], *, timeout: float = 30.0
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float = DEFAULT_JOB_CONTROL_TIMEOUT,
     ) -> dict[str, Any]:
         bootstrap = (
             f"{self._helper_source.rstrip()}\n\n" if not self._bootstrapped else ""

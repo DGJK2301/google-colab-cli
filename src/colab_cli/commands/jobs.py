@@ -26,7 +26,12 @@ from typing import List, Optional
 import typer
 from typing_extensions import Annotated
 
-from colab_cli.jobs import DEFAULT_JOB_ROOT, JobTail, RemoteJobClient
+from colab_cli.jobs import (
+    DEFAULT_JOB_CONTROL_TIMEOUT,
+    DEFAULT_JOB_ROOT,
+    JobTail,
+    RemoteJobClient,
+)
 from colab_cli.remote import open_remote_executor
 
 
@@ -74,13 +79,34 @@ def _drain_stream(
     stream: str,
     offset: int,
     max_bytes: int,
+    *,
+    started: float | None = None,
+    timeout: float | None = None,
 ) -> int:
     while True:
-        tail = client.tail(job_id, stream=stream, offset=offset, max_bytes=max_bytes)
+        kwargs = {}
+        if timeout is not None:
+            kwargs["timeout"] = _remaining_wait_timeout(started, timeout)
+        tail = client.tail(
+            job_id,
+            stream=stream,
+            offset=offset,
+            max_bytes=max_bytes,
+            **kwargs,
+        )
         _echo_tail(tail)
         offset = tail.next_offset
         if tail.eof or not tail.data:
             return offset
+
+
+def _remaining_wait_timeout(started: float | None, timeout: float) -> float:
+    if started is None:
+        raise ValueError("wait start time is required for a finite timeout")
+    remaining = timeout - (time.monotonic() - started)
+    if remaining <= 0:
+        raise TimeoutError("local wait deadline exceeded")
+    return min(DEFAULT_JOB_CONTROL_TIMEOUT, remaining)
 
 
 def _remote_exit_code(status: dict) -> int:
@@ -291,12 +317,27 @@ def wait(
     try:
         session_name, executor, client = _open_client(session, job_root)
         while True:
-            status = client.status(job_id)
+            status_kwargs = {}
+            if timeout is not None:
+                status_kwargs["timeout"] = _remaining_wait_timeout(started, timeout)
+            status = client.status(job_id, **status_kwargs)
             stdout_offset = _drain_stream(
-                client, job_id, "stdout", stdout_offset, max_bytes
+                client,
+                job_id,
+                "stdout",
+                stdout_offset,
+                max_bytes,
+                started=started,
+                timeout=timeout,
             )
             stderr_offset = _drain_stream(
-                client, job_id, "stderr", stderr_offset, max_bytes
+                client,
+                job_id,
+                "stderr",
+                stderr_offset,
+                max_bytes,
+                started=started,
+                timeout=timeout,
             )
             if status.get("state") in _TERMINAL_STATES:
                 exit_code = _remote_exit_code(status)
@@ -324,6 +365,15 @@ def wait(
             time.sleep(poll_seconds)
     except typer.Exit:
         raise
+    except TimeoutError as exc:
+        if timeout is not None:
+            typer.echo(
+                f"[colab] Wait timed out; remote job {job_id} is still running.",
+                err=True,
+            )
+            raise typer.Exit(124)
+        typer.echo(f"[colab] Wait failed: {exc}", err=True)
+        raise typer.Exit(1)
     except Exception as exc:
         typer.echo(f"[colab] Wait failed: {exc}", err=True)
         raise typer.Exit(1)

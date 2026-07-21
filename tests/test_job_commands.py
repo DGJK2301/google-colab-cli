@@ -199,6 +199,49 @@ def test_wait_timeout_does_not_cancel_job(
     open_executor.return_value.close.assert_called_once_with()
 
 
+@patch(
+    "colab_cli.commands.jobs.time.monotonic",
+    side_effect=[10.0, 10.0, 10.0, 10.0],
+)
+@patch("colab_cli.commands.jobs.RemoteJobClient")
+@patch("colab_cli.commands.jobs.open_remote_executor")
+def test_wait_propagates_remaining_deadline_to_job_control_calls(
+    open_executor, job_client, monotonic, mock_common_state
+):
+    _session(mock_common_state)
+    client = job_client.return_value
+    client.status.return_value = {
+        "job_id": "train",
+        "state": "succeeded",
+        "returncode": 0,
+    }
+    client.tail.side_effect = [
+        JobTail("train", "stdout", 0, 0, 0, True, b""),
+        JobTail("train", "stderr", 0, 0, 0, True, b""),
+    ]
+
+    result = runner.invoke(app, ["wait", "train", "-s", "s1", "--timeout", "120"])
+
+    assert result.exit_code == 0, result.output
+    client.status.assert_called_once_with("train", timeout=120.0)
+    assert client.tail.call_args_list == [
+        call(
+            "train",
+            stream="stdout",
+            offset=0,
+            max_bytes=65536,
+            timeout=120.0,
+        ),
+        call(
+            "train",
+            stream="stderr",
+            offset=0,
+            max_bytes=65536,
+            timeout=120.0,
+        ),
+    ]
+
+
 @patch("colab_cli.commands.jobs.RemoteJobClient")
 @patch("colab_cli.commands.jobs.open_remote_executor")
 def test_cancel_uses_bounded_grace_and_closes_executor(
