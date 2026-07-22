@@ -250,6 +250,76 @@ def test_cli_stop(mock_client, mock_store, mock_common_state):
     mock_store.remove.assert_called_with("s1")
 
 
+def test_cli_stop_orphan_by_exact_endpoint(mock_client, mock_store, mock_history):
+    assignment = MagicMock(endpoint="orphan-ep")
+    mock_client.list_assignments.return_value = [assignment]
+    mock_store.list.return_value = {}
+
+    result = runner.invoke(app, ["stop", "--endpoint", "orphan-ep"])
+
+    assert result.exit_code == 0
+    mock_client.unassign.assert_called_once_with("orphan-ep")
+    mock_history.log_event.assert_called_once_with(
+        "_orphan_assignments",
+        "orphan_assignment_released",
+        {"endpoint": "orphan-ep"},
+    )
+    history_key = mock_history.log_event.call_args.args[0]
+    assert not set('<>:"/\\|?*') & set(history_key)
+    assert "Orphan assignment released" in result.output
+
+
+def test_cli_stop_orphan_history_failure_is_best_effort(
+    mock_client, mock_store, mock_history
+):
+    assignment = MagicMock(endpoint="orphan-ep")
+    mock_client.list_assignments.return_value = [assignment]
+    mock_store.list.return_value = {}
+
+    def fail_history_write(*_args, **_kwargs):
+        mock_client.unassign.assert_called_once_with("orphan-ep")
+        raise OSError("history write failed")
+
+    mock_history.log_event.side_effect = fail_history_write
+    result = runner.invoke(app, ["stop", "--endpoint", "orphan-ep"])
+
+    assert result.exit_code == 0
+    mock_client.unassign.assert_called_once_with("orphan-ep")
+    assert "Orphan assignment released: orphan-ep" in result.output
+
+
+def test_cli_stop_endpoint_rejects_locally_tracked_assignment(mock_client, mock_store):
+    assignment = MagicMock(endpoint="tracked-ep")
+    mock_client.list_assignments.return_value = [assignment]
+    mock_store.list.return_value = {
+        "tracked": MagicMock(name="tracked", endpoint="tracked-ep")
+    }
+
+    result = runner.invoke(app, ["stop", "--endpoint", "tracked-ep"])
+
+    assert result.exit_code == 1
+    assert "colab stop -s tracked" in result.output
+    mock_client.unassign.assert_not_called()
+
+
+def test_cli_stop_endpoint_requires_exact_server_assignment(mock_client, mock_store):
+    mock_client.list_assignments.return_value = []
+    mock_store.list.return_value = {}
+
+    result = runner.invoke(app, ["stop", "--endpoint", "missing-ep"])
+
+    assert result.exit_code == 1
+    assert "not active on the server" in result.output
+    mock_client.unassign.assert_not_called()
+
+
+def test_cli_stop_rejects_session_and_endpoint_together(mock_client, mock_store):
+    result = runner.invoke(app, ["stop", "-s", "s1", "--endpoint", "e1"])
+
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
 def test_cli_sessions_prune(mock_common_state):
     mock_assignment = MagicMock()
     mock_session_state1 = MagicMock()
@@ -630,3 +700,51 @@ def test_cli_new_non_400_error_propagates(mock_client, mock_store):
     # Should not present the 400-specific friendly text
     assert "quota" not in result.output.lower()
     mock_store.add.assert_not_called()
+
+
+def _cli_assignment_error(status, reason="Error"):
+    response = MagicMock(status_code=status, reason=reason)
+    return ColabRequestError(
+        "assignment failed", request=MagicMock(), response=response
+    )
+
+
+def test_cli_new_invalid_gpu_fails_before_assign(mock_client, mock_store):
+    result = runner.invoke(app, ["new", "-s", "bad", "--gpu", "T44"])
+    assert result.exit_code == 2
+    assert "Unsupported GPU" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_cli_new_gpu_and_tpu_fail_before_assign(mock_client, mock_store):
+    result = runner.invoke(app, ["new", "-s", "bad", "--gpu", "T4", "--tpu", "v5e1"])
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.stderr
+    mock_client.assign.assert_not_called()
+
+
+def test_cli_new_http_412_has_honest_message(mock_client, mock_store):
+    mock_client.assign.side_effect = _cli_assignment_error(412, "Precondition Failed")
+    result = runner.invoke(app, ["new", "-s", "gpu", "--gpu", "T4"])
+    assert result.exit_code == 1
+    assert "HTTP 412" in result.stderr
+    assert "does not reliably mean too many" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_new_http_503_is_retryable_capacity_message(mock_client, mock_store):
+    mock_client.assign.side_effect = _cli_assignment_error(503, "Service Unavailable")
+    result = runner.invoke(app, ["new", "-s", "gpu", "--gpu", "G4"])
+    assert result.exit_code == 1
+    assert "temporarily unavailable" in result.stderr
+    assert "bounded backoff" in result.stderr
+
+
+def test_cli_auth_default_matches_public_oauth_contract():
+    import inspect
+
+    from colab_cli.auth import AuthProvider
+    from colab_cli.cli import callback
+
+    default = inspect.signature(callback).parameters["auth"].default
+    assert default is AuthProvider.OAUTH2

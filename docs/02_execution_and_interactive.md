@@ -32,7 +32,7 @@ Execution involves sending Python code (or shell commands) to the Jupyter kernel
     - If file path is local: Read content, send as code.
     - If file path is remote: Execute `!python <path>`.
 - **Multi-Modal Output**: Handle `display_data` messages (e.g., `image/png`, `text/html`). For the CLI, we'll save images to temporary files and print their paths, or if the terminal supports it (e.g., iTerm2), inline them.
-- **Timeout Configuration**: Exposes a `--timeout` flag (default 30s) to allow long-running silent tasks (like model compilation or data downloading) to execute without being prematurely killed.
+- **Timeout Configuration**: `--timeout` (default 30s) is a finite local wait deadline for each kernel execution, including the `/content` prelude. Zero, negative, NaN, and infinite values fail locally. Expiry raises `TimeoutError` and the command returns `124`; it does **not** prove that an existing remote kernel stopped. Long-running training must use the detached `submit`/`wait` lifecycle rather than one open `exec` request.
 - **Notebook cell selection**: Repeating `--cell-title` selects code cells by their exact, unique `# @title` value. Selection preserves notebook order rather than command-line order. A missing title, duplicate request, or duplicate title in the notebook is a usage error detected before connecting to the kernel. The option is only valid with `.ipynb` files.
 - **Automation failure policy**: Jupyter reports user-code exceptions as output messages, so compatibility mode continues to return success after displaying them. Automated workflows should pass `--fail-on-error`; the command then saves notebook output, stops the runtime connection, and returns exit code 1 after the first error output.
 
@@ -55,6 +55,8 @@ colab exec -s smoke -f workflow.ipynb \
 - **Kernel Management**: `ColabRuntime` (from `colab-agent`) already handles message signing and message types.
 - **Output Streaming**: Continuous polling or asynchronous message handling to provide real-time output.
 - **Piping Example**: `cat script.py | colab exec -s my-session`.
+- **Timeout guard**: The pinned Colab Jupyter client is wrapped by a narrow event proxy that checks IOPub/stdin queues and the event bit at the deadline. It raises instead of entering an `Event.wait(0)` busy loop and is restored after each call.
+- **stdin contract**: A delivered `input_request` receives exactly one reply through the transport public `input()` method. Custom hooks receive the complete request dictionary; password input uses `getpass` and is redacted from history.
 
 ## Testing Strategy
 TDD is mandatory for all execution features.
@@ -66,6 +68,9 @@ TDD is mandatory for all execution features.
 - **Test Case**: Verify `--fail-on-error` returns nonzero, stops the runtime, and does not execute later cells after a Jupyter error output.
 - **Test Case**: Verify repeated `--cell-title` executes only uniquely selected cells in notebook order and rejects missing or ambiguous titles before creating a runtime.
 - **Test Case**: If the WebSocket readiness wait expires without opening channels, preserve the remote kernel id, discard only the failed local client, and reconnect with a bounded retry.
+- **Test Case**: A quiet finite execution raises at the deadline instead of polling with zero timeout; a message/event arriving on the boundary wins over the timeout.
+- **Test Case**: stdin sends one canonical reply, preserves the full request for custom hooks, converts `None` to an empty reply, and never records a password value.
+- **Test Case**: prelude and body timeouts return `124`, record an `execution_timeout` event, clear local running state, and report that an existing remote kernel may continue.
 
 ### 2. TTY and Piping
 - **Test Case**: Mock `sys.stdin.isatty()` to verify `colab repl` correctly switches between interactive mode and one-shot piped execution.

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import base64
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -85,6 +86,9 @@ class FakeExecutor:
         self.codes.append(code)
         return self.results.pop(0)
 
+    def reconnect(self):
+        pass
+
 
 def test_remote_file_ops_decodes_read_chunk():
     executor = FakeExecutor(
@@ -116,3 +120,37 @@ def test_remote_file_ops_finalize_requires_size_hash_and_atomic_replace():
     assert "os.replace" in code
     assert "expected_size = 3" in code
     assert "expected_sha256 = 'abc'" in code
+    assert "if os.path.isfile(temp_runtime_path)" in code
+
+
+def test_remote_file_ops_reconnects_once_for_transport_failure():
+    executor = FakeExecutor(
+        [ConnectionError("Connection is already closed"), {"exists": False}]
+    )
+    executor.reconnect = MagicMock()
+
+    def execute(code, *, timeout=30.0):
+        result = executor.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    executor.execute_json = execute
+    remote = RemoteFileOps(executor)
+
+    assert remote.stat_file("content/a.part") == {"exists": False}
+    executor.reconnect.assert_called_once_with()
+
+
+def test_remote_file_ops_does_not_retry_remote_code_error():
+    executor = FakeExecutor([])
+    executor.reconnect = MagicMock()
+    executor.execute_json = MagicMock(
+        side_effect=RemoteExecutionError("FileNotFoundError: missing")
+    )
+    remote = RemoteFileOps(executor)
+
+    with pytest.raises(RemoteExecutionError, match="FileNotFoundError"):
+        remote.stat_file("content/missing")
+
+    executor.reconnect.assert_not_called()

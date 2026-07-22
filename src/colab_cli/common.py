@@ -21,7 +21,7 @@ from typing import Optional
 
 import typer
 
-from colab_cli.auth import AuthProvider, get_credentials
+from colab_cli.auth import DEFAULT_AUTH_PROVIDER, get_credentials
 from colab_cli.client import Client, Prod
 from colab_cli.history import HistoryLogger
 from colab_cli.state import StateStore, SettingsStore
@@ -32,7 +32,7 @@ class State:
         self.client_oauth_config = os.path.expanduser("~/.colab-cli-oauth-config.json")
         self.config_path = None
         self.logtostderr = False
-        self.auth_provider = AuthProvider.OAUTH2
+        self.auth_provider = DEFAULT_AUTH_PROVIDER
         self._client = None
         self._store = None
         self._settings_store = None

@@ -29,15 +29,20 @@ Designed to support seamless developer productivity, headless automation, and AI
 
 ## Installation
 
-Install the package using `uv` (recommended) or standard `pip`:
+Install the audited fork release by exact tag. The tag pins the Colab-specific
+Jupyter transport in published metadata as well as in `uv.lock`:
 
 ```bash
 # Using uv (recommended)
-uv tool install google-colab-cli
+uv tool install --force "git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
 
 # Using pip
-pip install google-colab-cli
+pip install --force-reinstall "google-colab-cli @ git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
 ```
+
+Do not install this release into an arbitrary shared Jupyter environment when an
+isolated `uv tool` environment is available. `colab version` should report
+`0.6.0.post1` before a training run is submitted.
 
 ---
 
@@ -74,14 +79,14 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | `colab sessions` | List all active sessions currently active on the backend |
 | `colab status [-s NAME]` | Display hardware, status, and local metadata for active sessions |
 | `colab restart-kernel [-s NAME]` | Restart the active session's Jupyter kernel |
-| `colab stop [-s NAME]` | Terminate a session VM and tear down its keep-alive daemon |
+| `colab stop [-s NAME] [--endpoint ENDPOINT]` | Terminate a tracked session, or release an exact untracked server assignment |
 | `colab url [-s NAME] [--open]` | Print or open a browser URL connecting to the active session |
 
 ### Execution
 | Command | Description |
 | --- | --- |
 | `colab run [--gpu GPU] [--tpu TPU] [--keep] SCRIPT [ARGS...]` | Run a local script on a fresh VM, forwarding arguments, then release it |
-| `colab exec [-s NAME] [-f FILE] [--output-image PATH]` | Execute Python code from stdin, a local `.py` file, or a `.ipynb` notebook |
+| `colab exec [-s NAME] [-f FILE] [--timeout SEC] [--output-image PATH]` | Execute Python code from stdin, a local `.py` file, or a `.ipynb` notebook |
 | `colab repl [-s NAME] [--output-image PATH]` | Start an interactive Python REPL on the VM (exits cleanly on piped EOF) |
 | `colab console [-s NAME]` | Connect to a raw interactive TTY shell (tmux) on the remote VM |
 
@@ -115,7 +120,7 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | `colab update [--install]` | Check for a newer release (and optionally upgrade the CLI in place) |
 
 ### Global Options
-* `--auth {oauth2,adc}` — Authentication strategy for the Colab API (default: `adc`).
+* `--auth {oauth2,adc}` — Authentication strategy for the Colab API (default: `oauth2`; use `--auth=adc` explicitly for preconfigured Application Default Credentials).
 * `-c, --client-oauth-config PATH` — Path to public OAuth client credentials configuration (default: `~/.colab-cli-oauth-config.json`).
 * `--config PATH` — Path to local session metadata storage (default: `~/.config/colab-cli/sessions.json`).
 * `--logtostderr` — Direct debug logging output to stderr.
@@ -177,6 +182,9 @@ colab stop -s analysis
 * **Storage & State Paths:** Session tokens and metadata are stored at `~/.config/colab-cli/sessions.json`. Global CLI settings are located at `~/.config/colab-cli/settings.json`. These can be customized or isolated via the global `--config` flag.
 * **Bulk Data:** CLI file transfer is designed for source bundles, checkpoints, and diagnostics. Keep multi-gigabyte datasets in Drive/GCS and localize them inside the VM.
 * **Job Failure Boundary:** Persistent jobs survive local CLI disconnects, not Colab VM reclamation. A new VM cannot resume the old process; preserved status is reported as `lost`.
+* **Execution Timeout Boundary:** `exec --timeout` and `run --timeout` limit how long the local client waits for one kernel execution. Expiry returns exit code `124`; it does not prove that an existing remote kernel stopped. Use `submit`/`wait` for long training.
+* **Accelerator Validation:** Accelerator names are exact and fail closed. A typo such as `--gpu T44`, or passing both `--gpu` and `--tpu`, exits before any VM allocation request.
+* **Allocation Errors:** HTTP 412 is reported as an ambiguous usage/entitlement/capacity rejection, not as proof of too many active assignments.
 
 ### Ephemeral Accelerator Jobs
 

@@ -42,7 +42,7 @@ def test_job_client_submits_argv_without_shell_interpolation():
     code, timeout = executor.codes[0]
     assert "value with spaces" in code
     assert "dispatch('submit'" in code
-    assert timeout == 30.0
+    assert timeout == 120.0
 
 
 def test_job_client_decodes_incremental_tail():
@@ -93,3 +93,26 @@ def test_job_client_bootstraps_helper_once_per_connection():
     assert "def dispatch(" in first_code
     assert "def dispatch(" not in second_code
     assert "dispatch('status'" in second_code
+
+
+def test_job_client_status_and_tail_accept_explicit_control_timeout():
+    executor = FakeExecutor(
+        [
+            {"job_id": "train", "state": "running"},
+            {
+                "job_id": "train",
+                "stream": "stdout",
+                "offset": 0,
+                "next_offset": 0,
+                "size": 0,
+                "eof": True,
+                "data": "",
+            },
+        ]
+    )
+    jobs = RemoteJobClient(executor)
+
+    jobs.status("train", timeout=45.0)
+    jobs.tail("train", timeout=12.0)
+
+    assert [timeout for _, timeout in executor.codes] == [45.0, 12.0]

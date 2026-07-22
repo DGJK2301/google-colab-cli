@@ -128,6 +128,7 @@ def test_spawn_keep_alive_command_includes_auth_flag(mocker):
     spawn_keep_alive("ep1", "sess1", auth_provider=AuthProvider.ADC)
 
     cmd = mock_popen.call_args.args[0]
+    assert cmd[1:3] == ["-m", "colab_cli.entrypoint"]
     # Global flags must come before the subcommand name in Typer.
     assert "--auth=adc" in cmd
     auth_idx = cmd.index("--auth=adc")
@@ -478,3 +479,49 @@ def test_keep_alive_logs_error_events_and_last_error(mock_common_state):
     assert payload["reason"] == "consecutive_4xx_errors"
     assert payload["last_error"]["status_code"] == 404
     assert payload["last_error"]["error_type"] == "ColabRequestError"
+
+
+def test_new_unassign_failure_retains_local_recovery_state(mock_common_state, capsys):
+    assignment = MagicMock()
+    assignment.endpoint = "e-retain"
+    assignment.runtime_proxy_info.token = "token"
+    assignment.runtime_proxy_info.url = "https://runtime"
+    mock_common_state.client.assign.return_value = assignment
+    mock_common_state.client.keep_alive_assignment.side_effect = RuntimeError(
+        "setup failed"
+    )
+    # A non-ColabRequestError escapes setup and enters rollback.
+    mock_common_state.client.unassign.side_effect = RuntimeError("network ambiguous")
+    mock_common_state.store.get.return_value = None
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        new(session="retain-me")
+
+    assert "Retained session 'retain-me' locally" in capsys.readouterr().err
+    retained = mock_common_state.store.add.call_args.args[0]
+    assert retained.name == "retain-me"
+    assert retained.endpoint == "e-retain"
+    mock_common_state.store.remove.assert_not_called()
+
+
+@patch("colab_cli.common.kill_process")
+def test_stop_unassign_failure_retains_state_without_stale_keep_alive_pid(
+    mock_kill_process, mock_common_state
+):
+    session = SessionState(
+        name="retain-stop",
+        token="token",
+        url="https://runtime",
+        endpoint="e-retain",
+        keep_alive_pid=9876,
+    )
+    mock_common_state.store.get.return_value = session
+    mock_common_state.client.unassign.side_effect = RuntimeError("network ambiguous")
+
+    with pytest.raises(RuntimeError, match="network ambiguous"):
+        stop(session="retain-stop")
+
+    mock_kill_process.assert_called_once_with(9876)
+    assert session.keep_alive_pid is None
+    mock_common_state.store.add.assert_called_with(session)
+    mock_common_state.store.remove.assert_not_called()

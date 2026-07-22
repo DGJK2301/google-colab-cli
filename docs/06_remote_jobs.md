@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-21: Raised the bounded default job-control RPC budget to 120 seconds for cold kernel/helper bootstrap. A finite `wait --timeout` is propagated as the shrinking budget for every status and log-tail call, so the internal control timeout cannot be shorter than or outlive the user's wait deadline.
 2026-07-20: Added reconnectable remote jobs with persisted argv/spec, atomic status, separate stdout/stderr logs, byte-offset tailing, bounded wait/cancel control calls, runtime boot identity, and process start-token validation.
 ---
 
@@ -74,6 +75,10 @@ the same transaction without that retry path.
   saved Colab session.
 - `tail` reports `next_offset`; `wait` maintains offsets for both streams.
 - A local `wait --timeout` exits 124 and leaves the remote job running.
+- Cold kernel connection and helper bootstrap use a bounded 120-second control
+  budget. For finite waits, each status/tail RPC receives only the remaining
+  user deadline; internal defaults cannot silently terminate a longer wait at
+  30 seconds or extend a shorter one.
 - `cancel` signals the runner process group, waits for a bounded grace period,
   then force-stops it if necessary.
 

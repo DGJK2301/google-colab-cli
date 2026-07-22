@@ -21,7 +21,7 @@ from typer.core import TyperGroup
 from typing_extensions import Annotated
 
 from colab_cli import auto_update
-from colab_cli.auth import AuthProvider
+from colab_cli.auth import DEFAULT_AUTH_PROVIDER, AuthProvider
 from colab_cli.common import state, setup_logging
 from colab_cli.commands import (
     automation,
@@ -83,7 +83,7 @@ def callback(
             ),
             case_sensitive=False,
         ),
-    ] = AuthProvider.OAUTH2,
+    ] = DEFAULT_AUTH_PROVIDER,
 ):
     """
     Colab CLI global configuration.

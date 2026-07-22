@@ -15,8 +15,18 @@
 import uuid
 import json
 import pytest
+import requests
 from unittest.mock import MagicMock
-from colab_cli.client import Client, Prod, PostAssignmentResponse, Assignment
+from colab_cli.client import (
+    Assignment,
+    Client,
+    ColabRequestError,
+    GetAssignmentResponse,
+    PostAssignmentResponse,
+    Prod,
+    TooManyAssignmentsError,
+    Variant,
+)
 
 
 @pytest.fixture
@@ -90,6 +100,77 @@ def test_client_unassign(client, mock_session):
     assert "unassign/my_endpoint" in last_call_args.args[1]
 
 
+def test_client_unassign_retries_token_get(client, mock_session, mocker):
+    get_resp = MagicMock(ok=True)
+    get_resp.text = ")]}'\n" + json.dumps({"token": "unassign_xsrf_token"})
+    post_resp = MagicMock(ok=True)
+    post_resp.text = ""
+    mock_session.request.side_effect = [
+        requests.ConnectionError("GET response lost"),
+        get_resp,
+        post_resp,
+    ]
+    sleep = mocker.patch("colab_cli.client.time.sleep")
+
+    client.unassign("my_endpoint")
+
+    methods = [call.args[0] for call in mock_session.request.call_args_list]
+    assert methods == ["GET", "GET", "POST"]
+    sleep.assert_called_once_with(0.5)
+
+
+def test_client_unassign_reconciles_lost_post_without_replaying(client, mock_session):
+    get_resp = MagicMock(ok=True)
+    get_resp.text = ")]}'\n" + json.dumps({"token": "unassign_xsrf_token"})
+    absent = MagicMock(ok=True)
+    absent.text = ")]}'\n" + json.dumps({"assignments": []})
+    mock_session.request.side_effect = [
+        get_resp,
+        requests.ConnectionError("POST response lost"),
+        absent,
+    ]
+
+    client.unassign("my_endpoint")
+
+    methods = [call.args[0] for call in mock_session.request.call_args_list]
+    assert methods == ["GET", "POST", "GET"]
+
+
+def test_client_unassign_preserves_lost_post_error_when_endpoint_remains(
+    client, mock_session, mocker
+):
+    get_resp = MagicMock(ok=True)
+    get_resp.text = ")]}'\n" + json.dumps({"token": "unassign_xsrf_token"})
+    present = MagicMock(ok=True)
+    present.text = ")]}'\n" + json.dumps(
+        {
+            "assignments": [
+                {
+                    "accelerator": "NONE",
+                    "endpoint": "my_endpoint",
+                    "machineShape": 0,
+                    "runtimeProxyInfo": {
+                        "token": "proxy_token",
+                        "tokenExpiresInSeconds": 3600,
+                        "url": "http://backend",
+                    },
+                    "variant": 0,
+                }
+            ]
+        }
+    )
+    error = requests.ConnectionError("POST response lost")
+    mock_session.request.side_effect = [get_resp, error, present, present, present]
+    sleep = mocker.patch("colab_cli.client.time.sleep")
+
+    with pytest.raises(requests.ConnectionError, match="POST response lost"):
+        client.unassign("my_endpoint")
+
+    methods = [call.args[0] for call in mock_session.request.call_args_list]
+    assert methods == ["GET", "POST", "GET", "GET", "GET"]
+    assert sleep.call_count == 2
+
+
 def test_client_assign_existing(client, mock_session):
     # Mock _get_assignment (GET) returning existing Assignment
     get_resp = MagicMock()
@@ -112,6 +193,59 @@ def test_client_assign_existing(client, mock_session):
     assert isinstance(res, Assignment)
     assert res.endpoint == "existing_endpoint"
     assert mock_session.request.call_count == 1
+
+
+def test_client_assign_reconciles_ambiguous_post_without_replaying_post(
+    client, mock_session
+):
+    pending = MagicMock(ok=True)
+    pending.text = ")]}'\n" + json.dumps(
+        {"acc": "NONE", "nbh": "some_nbh", "token": "xsrf", "variant": "DEFAULT"}
+    )
+    existing = MagicMock(ok=True)
+    existing.text = ")]}'\n" + json.dumps(
+        {
+            "endpoint": "reconciled-endpoint",
+            "runtimeProxyInfo": {
+                "token": "proxy-token",
+                "tokenExpiresInSeconds": 3600,
+                "url": "https://runtime",
+            },
+        }
+    )
+    mock_session.request.side_effect = [
+        pending,
+        requests.ConnectionError("POST response lost"),
+        existing,
+    ]
+
+    result = client.assign(uuid.uuid4())
+
+    assert isinstance(result, Assignment)
+    assert result.endpoint == "reconciled-endpoint"
+    methods = [call.args[0] for call in mock_session.request.call_args_list]
+    assert methods == ["GET", "POST", "GET"]
+
+
+def test_client_assign_preserves_ambiguous_post_error_when_not_reconciled(
+    client, mock_session, mocker
+):
+    pending = MagicMock(ok=True)
+    pending.text = ")]}'\n" + json.dumps(
+        {"acc": "NONE", "nbh": "some_nbh", "token": "xsrf", "variant": "DEFAULT"}
+    )
+    error = requests.ConnectionError("POST response lost")
+    mock_session.request.side_effect = [
+        error if index == 1 else pending for index in range(5)
+    ]
+    sleep = mocker.patch("colab_cli.client.time.sleep")
+
+    with pytest.raises(requests.ConnectionError, match="POST response lost"):
+        client.assign(uuid.uuid4())
+
+    methods = [call.args[0] for call in mock_session.request.call_args_list]
+    assert methods == ["GET", "POST", "GET", "GET", "GET"]
+    assert sleep.call_count == 2
 
 
 def test_client_list_assignments(client, mock_session):
@@ -234,3 +368,26 @@ def test_client_keep_alive_assignment_propagates_http_error(client, mock_session
 
     with pytest.raises(ColabRequestError):
         client.keep_alive_assignment("m-s-test-endpoint")
+
+
+def test_client_assign_preserves_legacy_412_type_and_http_evidence(client, mocker):
+    pending = GetAssignmentResponse(
+        acc="T4", nbh="notebook", token="xsrf", variant=Variant.GPU
+    )
+    mocker.patch.object(client, "_get_assignment", return_value=pending)
+    response = MagicMock(status_code=412, reason="Precondition Failed")
+    error = ColabRequestError(
+        "assignment failed",
+        request=MagicMock(),
+        response=response,
+        response_body="usage limit",
+    )
+    mocker.patch.object(client, "_post_assignment", side_effect=error)
+
+    with pytest.raises(TooManyAssignmentsError) as raised:
+        client.assign(uuid.uuid4(), variant=Variant.GPU)
+
+    assert isinstance(raised.value, ColabRequestError)
+    assert raised.value.response is response
+    assert raised.value.response_body == "usage limit"
+    assert raised.value.__cause__ is error

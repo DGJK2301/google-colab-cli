@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-21: Pointed the update checker at the audited fork's GitHub Releases API. Upgrade hints and `colab update --install` now pin an exact fork tag; `--install` consumes only the version returned by the current successfully parsed and persisted check, so legacy PyPI cache entries, malformed responses, network failures, and settings-write failures cannot trigger installation.
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
 2026-06-01: Enabled `colab update --install` self-update on macOS in addition to Linux. Refactored platform check logic to keep the implementation DRY and updated both tests and documentation. Also, on these platforms, an additional message is shown recommending `colab update --install` to upgrade in place, positioned above the standard `pip`/`uv` installation command.
 2026-05-29: Added default OAuth2 client config (`oauth_config.json`) as a bundled package resource and restored fallback loading logic in `get_credentials()`. The CLI now falls back to using these default credentials when no explicit local config is found. Added `integration/repro_bundled_oauth` integration test.
@@ -182,9 +183,15 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
     Typer callback in `cli.py`.
 -   **Manual-check**: `colab update` forces a check and prints the status.
 -   **Implementation**:
-    -   Fetches a PyPI-style JSON document from a configurable `update_url`
-        (default: `https://pypi.org/pypi/google-colab-cli/json`) and reads
-        `info.version`.
+    -   Fetches a release JSON document from a configurable `update_url`
+        (default:
+        `https://api.github.com/repos/DGJK2301/google-colab-cli/releases/latest`)
+        and validates `tag_name` as a PEP 440 version. PyPI-style
+        `info.version` remains accepted for an explicitly configured custom
+        source, but is not the default release identity.
+    -   Migrates only the exact former upstream PyPI default to the audited
+        fork source and clears that source's cached version. An explicitly
+        configured custom URL is not rewritten.
     -   Compares the fetched version with the current CLI version using
         PEP 440 / semantic versioning, falling back to string equality when a
         version is unparseable.
@@ -194,29 +201,36 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
             throttle).
         -   `enable_update_check`: master switch for both the daily fetch and
             the cached banner.
-        -   `latest_version`: highest version observed during the most
-            recent successful check. Updated whenever a strictly-newer
-            version is observed (never downgraded), and preserved verbatim
-            across failed checks so transient network issues do not erase
-            the cache.
+        -   `latest_version`: highest version observed for the active source.
+            Updated whenever a strictly-newer version is observed (never
+            downgraded). Migrating the former upstream default clears this
+            field so an upstream version cannot be reinterpreted as a fork
+            tag.
 -   **Notification**: If a new version is found, a non-intrusive message is
-    printed to the console with a `Run 'pip install --upgrade google-colab-cli' to
-    update.` hint. On Linux and macOS platforms where `--install` self-update is supported,
-    an additional hint `You can run 'colab update --install' to upgrade in place.`
-    is displayed above the pip/uv install command. The cached banner shown between
-    fetches uses the generic `Run 'colab update' to update.` hint.
+    printed with a `pip` or `uv` command that pins the exact audited fork tag.
+    On Linux and macOS platforms where `--install` self-update is supported,
+    an additional hint `You can run 'colab update --install' to upgrade in
+    place.` is displayed above that command. The cached banner shown between
+    fetches uses the generic `Run 'colab update' to update.` hint because the
+    cache is not an installation authority.
 -   **Self-install (`--install`)**: An opt-in `--install` flag (default
     `False`) makes `colab update` upgrade the CLI in place (**Linux and macOS**).
-    It detects how the CLI was installed:
+    Installation is allowed only when the current invocation successfully
+    fetches, parses, and persists a newer fork release. It never reloads the
+    cross-process `latest_version` cache as an install target. It detects how
+    the CLI was installed:
     - If `sys.executable` contains `/uv/tools` (indicating it was installed via
-      `uv tool install`), it runs `uv tool install -U google-colab-cli`.
-    - Otherwise, runs `pip install -U google-colab-cli` using `sys.executable`
-      to ensure the upgrade lands in the same interpreter.
+      `uv tool install`), it runs `uv tool install --force` with the exact fork
+      Git tag.
+    - Otherwise, runs `pip install --force-reinstall` with the exact fork Git
+      tag using `sys.executable`, ensuring the upgrade lands in the same
+      interpreter.
     On other platforms, the command exits non-zero with an explanatory
-    message. When the cached `latest_version` is already at or below the
-    current install, the flag is a silent no-op so it is safe to wire into
-    automation. If the upgrade command exits non-zero, `colab update --install`
-    propagates the same exit code.
+    message. When the verified release is already at or below the current
+    install, the flag is a silent no-op. Malformed responses, network failures,
+    and settings persistence failures block installation. If the upgrade
+    command exits non-zero, `colab update --install` propagates the same exit
+    code.
 
 ### 8. Identity Inspection (`colab whoami`) [developer-only]
 

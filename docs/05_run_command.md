@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-21: Preserved timeout exit code `124` when writing the optional timeout history event fails. History I/O is diagnostic and can no longer replace the primary execution deadline result during either the `/content` prelude or script body.
 2026-05-12: Initial design and implementation of `colab run <script.py> [args...]`. Combines `colab new` + `colab exec` + `colab stop` into a single fire-and-forget invocation so a Python file can use `#!/usr/bin/env -S colab run` as a shebang line and execute on a freshly-allocated Colab VM. Adds `--keep` (skip auto-stop), `--gpu` / `--tpu` (passthrough to session creation), `-s/--session` (name the ephemeral session), and propagates the script's exit status (non-zero on any uncaught exception in the kernel). The script's `sys.argv` is re-set inside the kernel to mirror native `python script.py arg1 arg2` semantics, and `__name__` is set to `"__main__"`.
 2026-05-12: Native CPython exit-code semantics for `sys.exit()` / `raise SystemExit(...)` from the script body. The Colab kernel reports a `SystemExit` as `output_type=='error'`, which under the previous logic would have (a) printed the IPython traceback (`An exception has occurred, use %tb...`) and (b) flagged the run as a failure regardless of the integer exit code. Now: `sys.exit()` / `sys.exit(0)` exit 0 silently; `sys.exit(N)` exits N; `sys.exit('msg')` exits 1 (matching CPython). The IPython "To exit: use 'exit', 'quit', or Ctrl-D." UserWarning is filtered via the prelude. Encoded after running `examples/gpu_hello.py` end-to-end and seeing the noisy `SystemExit: 0` traceback at the end of an otherwise-successful GPU run.
 2026-06-04: Bumped the default value of the `--timeout` flag from 10.0s to 30.0s so short-but-silent tasks aren't prematurely killed out of the box. Mirrors the same change for `colab exec`.
@@ -30,7 +31,7 @@ colab run [OPTIONS] SCRIPT [SCRIPT_ARGS]...
 | `--gpu` | str | None | Same set as `colab new --gpu` (T4, L4, G4, H100, A100). |
 | `--tpu` | str | None | Same set as `colab new --tpu` (v5e1, v6e1). |
 | `--keep` | bool | False | Do **not** stop the session after the script finishes. |
-| `--timeout` | float | 30.0 | Timeout in seconds for code execution to prevent hanging on silent tasks. |
+| `--timeout` | float | 30.0 | Finite local wait deadline per kernel execution. Expiry returns 124; cleanup is attempted unless `--keep` preserves the VM. |
 
 ### Shebang usage
 With `--keep` and `--gpu` baked into the shebang line, an entire one-file workload becomes:
@@ -47,7 +48,7 @@ print(torch.cuda.get_device_name(0))
 
 ## Behavior
 
-1. **Allocate**: Creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). Session name defaults to `run-<6 hex>`.
+1. **Validate and allocate**: Validates the script path, finite timeout, and exact accelerator name before any API request. `--gpu` and `--tpu` are mutually exclusive; unknown names never fall back to a different accelerator. Then it creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). Session name defaults to `run-<6 hex>`.
 2. **Execute**: Reads the script file. Prepends a deterministic prelude that re-sets `sys.argv` and `__name__` so the script body sees the same execution context as `python script.py arg1 arg2`:
    ```python
    import sys
@@ -55,7 +56,7 @@ print(torch.cuda.get_device_name(0))
    __name__ = '__main__'
    ```
    Then executes the script body in the same kernel cell so any `if __name__ == "__main__":` guard fires.
-3. **Detect failure**: If the kernel returns any output of `output_type == "error"` (uncaught exception, syntax error, etc.) the CLI exits non-zero.
+3. **Detect failure**: If the kernel returns any output of `output_type == "error"` (uncaught exception, syntax error, etc.) the CLI exits non-zero. If the local wait expires, the CLI returns `124`. Without `--keep`, teardown attempts to release the ephemeral VM; with `--keep`, the message explicitly warns that the remote kernel may still be running.
 4. **Tear down**: In a `finally` block, unless `--keep` was passed, the CLI:
    - Sends `runtime.stop(shutdown_kernel=True)` (best-effort).
    - Calls `state.client.unassign(endpoint)` to free the billable VM.

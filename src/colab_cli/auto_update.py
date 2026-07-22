@@ -14,7 +14,7 @@
 
 """Auto-update subsystem.
 
-Owns version detection, the PyPI-style update probe, the on-disk
+Owns version detection, the release update probe, the on-disk
 ``latest_version`` cache, and the upgrade-banner UX. The CLI's global
 callback (``cli.py``) calls ``check_for_updates`` once per day and
 ``maybe_show_cached_banner`` on every other invocation; the
@@ -34,10 +34,14 @@ from typing import Optional
 import typer
 
 from colab_cli.common import state
-from colab_cli.state import Settings
+from colab_cli.state import (
+    DEFAULT_UPDATE_URL,
+    LEGACY_UPSTREAM_UPDATE_URL,
+    Settings,
+)
 
-# PyPI distribution name (different from the importable package name `colab`).
-PYPI_PACKAGE_NAME = "google-colab-cli"
+DISTRIBUTION_NAME = "google-colab-cli"
+FORK_REPOSITORY_URL = "https://github.com/DGJK2301/google-colab-cli.git"
 
 
 # ---------- Version detection -------------------------------------------
@@ -69,12 +73,22 @@ def get_app_version() -> str:
 
 
 def _parse_version(payload: Optional[dict]) -> Optional[str]:
-    """Returns ``info.version`` from a PyPI-style payload, or None."""
-    return (payload or {}).get("info", {}).get("version")
+    """Return a validated PEP 440 version from PyPI or GitHub release JSON."""
+    payload = payload or {}
+    raw = payload.get("info", {}).get("version") or payload.get("tag_name")
+    if not isinstance(raw, str):
+        return None
+    candidate = raw.strip()
+    if candidate.startswith("v"):
+        candidate = candidate[1:]
+    try:
+        return str(Version(candidate))
+    except InvalidVersion:
+        return None
 
 
-def _fetch_pypi(url: str, quiet: bool) -> Optional[dict]:
-    """Fetches and parses the PyPI-style JSON document at ``url``."""
+def _fetch_release(url: str, quiet: bool) -> Optional[dict]:
+    """Fetch and parse a release JSON document at ``url``."""
     try:
         with urllib.request.urlopen(url, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -133,17 +147,24 @@ def announce_upgrade(
 # ---------- Orchestration -----------------------------------------------
 
 
-def _get_install_command() -> str:
-    """Return the recommended installation command based on the environment."""
+def _release_install_spec(version: str) -> str:
+    """Return the exact audited fork Git reference for a validated version."""
+    normalized = str(Version(version))
+    return f"git+{FORK_REPOSITORY_URL}@v{normalized}"
+
+
+def _get_install_command(version: str) -> str:
+    """Return an exact fork installation command for the environment."""
     import sys
 
+    spec = _release_install_spec(version)
     if is_self_install_supported() and "/uv/tools/" in sys.executable:
-        return f"uv tool install -U {PYPI_PACKAGE_NAME}"
-    return f"pip install --upgrade {PYPI_PACKAGE_NAME}"
+        return f'uv tool install --force "{spec}"'
+    return f'pip install --force-reinstall "{DISTRIBUTION_NAME} @ {spec}"'
 
 
-def check_for_updates(quiet: bool = False) -> None:
-    """Check PyPI for updates and print a message if a new version is available.
+def check_for_updates(quiet: bool = False) -> Optional[str]:
+    """Check audited fork releases and return this check's verified version.
 
     The disable-hint is appended to the banner only when ``quiet`` is True
     (the daily background fetch); explicit ``colab update`` invocations
@@ -153,31 +174,41 @@ def check_for_updates(quiet: bool = False) -> None:
     current = get_app_version()
 
     try:
-        pypi = _fetch_pypi(settings.update_url, quiet)
-        pypi_v = _parse_version(pypi)
+        # Existing installs may have persisted the former upstream PyPI URL.
+        # Migrate only that exact legacy default; explicit custom URLs remain
+        # under user control.
+        if settings.update_url == LEGACY_UPSTREAM_UPDATE_URL:
+            settings.update_url = DEFAULT_UPDATE_URL
+            # A cached version is meaningful only relative to its source. Do
+            # not reinterpret an upstream PyPI version as an audited fork tag.
+            settings.latest_version = None
+        release = _fetch_release(settings.update_url, quiet)
+        release_v = _parse_version(release)
 
-        if _is_newer(pypi_v, current):
+        if _is_newer(release_v, current):
             announce_upgrade(
-                pypi_v,
+                release_v,
                 current,
-                _get_install_command(),
+                _get_install_command(release_v),
                 show_disable_hint=quiet,
             )
         elif not quiet:
-            suffix = f", latest: {pypi_v}" if pypi_v else ""
+            suffix = f", latest: {release_v}" if release_v else ""
             typer.echo(f"[colab] Colab CLI is up to date (version: {current}{suffix}).")
 
         # Cache the highest observed version; never downgrade.
         cached = settings.latest_version or "0"
-        if _is_newer(pypi_v, cached):
-            settings.latest_version = pypi_v
+        if _is_newer(release_v, cached):
+            settings.latest_version = release_v
 
         settings.last_check = datetime.now(timezone.utc)
         state.settings_store.save(settings)
+        return release_v
 
     except Exception as e:
         if not quiet:
             typer.echo(f"[colab] Failed to check for updates: {e}")
+        return None
 
 
 # ---------- Background hooks (called from cli.py) -----------------------
@@ -231,16 +262,25 @@ def run_background_check() -> None:
 # ---------- Self-install ------------------------------------------------
 
 
-def self_install() -> None:
-    """Upgrade the CLI in place, detecting uv vs pip."""
+def self_install(version: str) -> None:
+    """Install one version verified by the current fork release check."""
     import sys
+
+    spec = _release_install_spec(version)
 
     # If the executable path contains "/uv/", we assume it was installed via
     # `uv tool install` and use `uv` to upgrade it.
     if "/uv/tools/" in sys.executable:
-        cmd = ["uv", "tool", "install", "-U", PYPI_PACKAGE_NAME]
+        cmd = ["uv", "tool", "install", "--force", spec]
     else:
-        cmd = [sys.executable, "-m", "pip", "install", "-U", PYPI_PACKAGE_NAME]
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            f"{DISTRIBUTION_NAME} @ {spec}",
+        ]
 
     typer.echo(f"[colab] Running: {' '.join(cmd)}")
     result = subprocess.run(cmd)

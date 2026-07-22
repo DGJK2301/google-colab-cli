@@ -26,6 +26,8 @@ from google.auth.transport import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,14 @@ class AuthProvider(str, enum.Enum):
     ADC = "adc"
 
 
+# Keep the public OAuth flow as the zero-configuration default. ADC remains an
+# explicit, automation-friendly option for users who have already minted the
+# required Colab scopes with gcloud. Centralising the value prevents the CLI
+# callback, detached keep-alive process, and direct ``get_credentials`` callers
+# from drifting to different defaults.
+DEFAULT_AUTH_PROVIDER = AuthProvider.OAUTH2
+
+
 # Standard Scopes for Colab and Drive (Public Auth)
 PUBLIC_SCOPES = [
     "openid",
@@ -49,6 +59,30 @@ PUBLIC_SCOPES = [
     "https://www.googleapis.com/auth/colaboratory",
     "https://www.googleapis.com/auth/drive.file",
 ]
+
+
+def _install_control_plane_retries(session: requests.AuthorizedSession) -> None:
+    """Retry transient failures only for idempotent control-plane reads."""
+
+    retry = Retry(
+        total=2,
+        connect=2,
+        # Keep the original requests.ReadTimeout type. The keep-alive endpoint
+        # deliberately treats that timeout as success after TFE records
+        # activity; Retry(read=0) would wrap it in MaxRetryError instead.
+        read=False,
+        redirect=0,
+        status=2,
+        other=2,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
 
 
 TOKEN_CONFIG_PATH = os.path.expanduser("~/.config/colab-cli/token.json")
@@ -226,7 +260,7 @@ def _get_adc_credentials() -> Credentials:
 
 def get_credentials(
     config_path: Optional[str] = None,
-    provider: AuthProvider = AuthProvider.OAUTH2,
+    provider: AuthProvider = DEFAULT_AUTH_PROVIDER,
 ) -> requests.AuthorizedSession:
     """Unified entry point for retrieving an authorized session.
 
@@ -244,4 +278,6 @@ def get_credentials(
     else:
         raise ValueError(f"Unknown auth provider: {provider!r}")
 
-    return requests.AuthorizedSession(creds)
+    session = requests.AuthorizedSession(creds)
+    _install_control_plane_retries(session)
+    return session

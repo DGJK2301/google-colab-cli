@@ -25,7 +25,7 @@ import requests
 from colab_cli.contents import ContentsClient
 
 
-DEFAULT_CHUNK_SIZE = 1024 * 1024
+DEFAULT_CHUNK_SIZE = 256 * 1024
 
 
 @dataclass(frozen=True)

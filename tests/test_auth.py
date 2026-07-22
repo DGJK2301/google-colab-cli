@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 
 from colab_cli.auth import (
+    DEFAULT_AUTH_PROVIDER,
     REMOTE_REDIRECT_URI,
     TOKEN_CONFIG_PATH,
     AuthProvider,
@@ -77,6 +78,33 @@ def test_get_credentials_valid_token(mock_deps):
     mock_deps["creds_cls"].from_authorized_user_file.assert_called_once()
     mock_deps["session"].assert_called_once_with(mock_creds)
     assert res == mock_deps["session"].return_value
+
+
+def test_get_credentials_installs_bounded_idempotent_transport_retries(mock_deps):
+    mock_deps["exists"].side_effect = lambda path: (
+        path
+        in [
+            "dummy_config.json",
+            TOKEN_CONFIG_PATH,
+        ]
+    )
+    mock_creds = MagicMock(valid=True)
+    mock_deps["creds_cls"].from_authorized_user_file.return_value = mock_creds
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        session = get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    assert session.mount.call_count == 2
+    prefixes = [call.args[0] for call in session.mount.call_args_list]
+    assert prefixes == ["https://", "http://"]
+    adapter = session.mount.call_args_list[0].args[1]
+    retry = adapter.max_retries
+    assert retry.total == 2
+    assert retry.connect == 2
+    assert retry.read is False
+    assert retry.other == 2
+    assert retry.allowed_methods == frozenset({"GET"})
+    assert 503 in retry.status_forcelist
 
 
 def test_get_credentials_expired_token_refresh(mock_deps):
@@ -156,3 +184,7 @@ def test_get_credentials_fallback_config(mock_deps):
     m_file.read_text.assert_called_once()
     mock_deps["creds_cls"].from_authorized_user_file.assert_called_once()
     assert res == mock_deps["session"].return_value
+
+
+def test_default_auth_provider_is_public_oauth():
+    assert DEFAULT_AUTH_PROVIDER is AuthProvider.OAUTH2

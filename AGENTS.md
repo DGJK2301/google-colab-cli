@@ -16,6 +16,35 @@
   - Persistent settings are in `~/.config/colab-cli/settings.json`.
 - **History**: `HistoryLogger` records structured events in `~/.config/colab-cli/history/*.jsonl`.
 
+## v0.6.0.post1 Reliability Contracts
+
+- **Published dependency identity:** the exact
+  `googlecolab/jupyter-kernel-client` commit belongs in `pyproject.toml` as a
+  direct reference and in `uv.lock`. A lock-only pin is not a release fix,
+  because wheel/tag consumers install from project metadata.
+- **Narrow transport compatibility:** keep timeout hardening in
+  `_jupyter_compat.py`; do not copy the upstream WebSocket receive loop. Remove
+  the guard only after a fixed transport release is pinned and the boundary
+  race tests pass.
+- **Timeout meaning:** `exec`/`run --timeout` is a local per-execution wait
+  deadline. Exit 124 is not proof of remote cancellation. Long work belongs in
+  reconnectable remote jobs.
+- **Jupyter stdin:** once an `input_request` reaches the hook, send exactly one
+  public `input()` reply. Never infer staleness from unrelated shell/stdin queue
+  readiness. Password values must not enter history or diagnostics.
+- **Accelerator fail-closed rule:** all accelerator parsing goes through
+  `accelerators.resolve_accelerator`. Unknown names and simultaneous GPU/TPU
+  flags fail before assignment; never default a typo to a scarce accelerator.
+- **Allocation evidence:** preserve `ColabRequestError` status/body. The
+  deprecated `TooManyAssignmentsError` type may remain for API compatibility,
+  but HTTP 412 is ambiguous and user-facing output must not present the class
+  name as a confirmed diagnosis.
+- **Authentication identity:** the shared default is
+  `DEFAULT_AUTH_PROVIDER == AuthProvider.OAUTH2`; ADC is explicit.
+- **Release recovery:** each deliverable version must include a cumulative patch
+  against its declared base, a source archive, a Git bundle, test evidence, and
+  SHA-256 checksums before work begins on the next version.
+
 ## Core Mandates
 - **Minimalism**: Favor standard library where possible (e.g., `urllib`) while utilizing `Typer` for CLI ergonomics.
 - **Piping**: Always consider piped input (`stdin`) vs. interactive TTY.
