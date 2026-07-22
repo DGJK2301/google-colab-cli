@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 import subprocess
 import sys
@@ -30,6 +31,10 @@ from colab_cli.client import ColabRequestError, PostAssignmentResponse
 from colab_cli.runtime import ColabRuntime
 from colab_cli.state import SessionState
 from colab_cli.utils import get_status_code
+
+
+logger = logging.getLogger(__name__)
+_ORPHAN_HISTORY_SESSION = "_orphan_assignments"
 
 
 def _is_scope_error(e: Exception) -> bool:
@@ -437,9 +442,19 @@ def stop(
             raise typer.Exit(1)
 
         state.client.unassign(endpoint)
-        state.history.log_event(
-            "?", "orphan_assignment_released", {"endpoint": endpoint}
-        )
+        try:
+            state.history.log_event(
+                _ORPHAN_HISTORY_SESSION,
+                "orphan_assignment_released",
+                {"endpoint": endpoint},
+            )
+        except Exception as history_error:
+            logger.warning(
+                "Orphan assignment %s was released, but its history event "
+                "could not be recorded: %s",
+                endpoint,
+                history_error,
+            )
         typer.echo(f"[colab] Orphan assignment released: {endpoint}")
         return
 

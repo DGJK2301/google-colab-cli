@@ -37,6 +37,10 @@ below corresponds to a tag of the same name.
 - Use a live-validated 256 KiB default for resumable transfers, reconnect once
   for idempotent file controls, and reconcile an upload finalization response
   against the destination's size and SHA-256.
+- Reject non-finite, non-positive, overflowing, and sub-byte transfer chunk
+  sizes during CLI parsing, before session lookup or remote executor creation.
+- Record orphan-assignment release history under a Windows-safe key and make
+  the audit write best-effort after confirmed server-side release.
 
 ### Security
 

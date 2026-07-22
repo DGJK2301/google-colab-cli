@@ -250,7 +250,7 @@ def test_cli_stop(mock_client, mock_store, mock_common_state):
     mock_store.remove.assert_called_with("s1")
 
 
-def test_cli_stop_orphan_by_exact_endpoint(mock_client, mock_store):
+def test_cli_stop_orphan_by_exact_endpoint(mock_client, mock_store, mock_history):
     assignment = MagicMock(endpoint="orphan-ep")
     mock_client.list_assignments.return_value = [assignment]
     mock_store.list.return_value = {}
@@ -259,7 +259,33 @@ def test_cli_stop_orphan_by_exact_endpoint(mock_client, mock_store):
 
     assert result.exit_code == 0
     mock_client.unassign.assert_called_once_with("orphan-ep")
+    mock_history.log_event.assert_called_once_with(
+        "_orphan_assignments",
+        "orphan_assignment_released",
+        {"endpoint": "orphan-ep"},
+    )
+    history_key = mock_history.log_event.call_args.args[0]
+    assert not set('<>:"/\\|?*') & set(history_key)
     assert "Orphan assignment released" in result.output
+
+
+def test_cli_stop_orphan_history_failure_is_best_effort(
+    mock_client, mock_store, mock_history
+):
+    assignment = MagicMock(endpoint="orphan-ep")
+    mock_client.list_assignments.return_value = [assignment]
+    mock_store.list.return_value = {}
+
+    def fail_history_write(*_args, **_kwargs):
+        mock_client.unassign.assert_called_once_with("orphan-ep")
+        raise OSError("history write failed")
+
+    mock_history.log_event.side_effect = fail_history_write
+    result = runner.invoke(app, ["stop", "--endpoint", "orphan-ep"])
+
+    assert result.exit_code == 0
+    mock_client.unassign.assert_called_once_with("orphan-ep")
+    assert "Orphan assignment released: orphan-ep" in result.output
 
 
 def test_cli_stop_endpoint_rejects_locally_tracked_assignment(mock_client, mock_store):

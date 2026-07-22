@@ -14,6 +14,7 @@
 
 import click
 import hashlib
+import math
 import os
 import tempfile
 import typer
@@ -23,6 +24,35 @@ from typing_extensions import Annotated
 from colab_cli.contents import ContentsClient
 from colab_cli.remote import RemoteFileOps, open_remote_executor
 from colab_cli.transfer import DEFAULT_CHUNK_SIZE, FileTransfer, TransferProgress
+
+
+_MIB = 1024 * 1024
+
+
+def _chunk_size_mib_to_bytes(value: float) -> int:
+    """Validate a MiB chunk size and return its integral byte count.
+
+    Validation happens before session lookup or executor construction so bad
+    input cannot open a remote control channel as a side effect.
+    """
+    if not math.isfinite(value):
+        raise typer.BadParameter("must be a finite number")
+    if value <= 0:
+        raise typer.BadParameter("must be greater than 0")
+
+    size_in_bytes = value * _MIB
+    if not math.isfinite(size_in_bytes):
+        raise typer.BadParameter("is too large")
+
+    chunk_size = int(size_in_bytes)
+    if chunk_size < 1:
+        raise typer.BadParameter("must convert to at least 1 byte")
+    return chunk_size
+
+
+def _validate_chunk_size_mib(value: float) -> float:
+    _chunk_size_mib_to_bytes(value)
+    return value
 
 
 def _progress(progress: TransferProgress) -> None:
@@ -38,14 +68,12 @@ def _progress(progress: TransferProgress) -> None:
 
 
 def _open_transfer(session, state, *, chunk_size_mib: float):
-    if chunk_size_mib <= 0:
-        typer.echo("[colab] Error: --chunk-size-mib must be positive.", err=True)
-        raise typer.Exit(2)
+    chunk_size = _chunk_size_mib_to_bytes(chunk_size_mib)
     executor = open_remote_executor(session, state.store, history=state.history)
     transfer = FileTransfer(
         ContentsClient(session),
         RemoteFileOps(executor),
-        chunk_size=int(chunk_size_mib * 1024 * 1024),
+        chunk_size=chunk_size,
         progress=_progress,
     )
     return executor, transfer
@@ -118,6 +146,7 @@ def upload(
         typer.Option(
             "--chunk-size-mib",
             help="Bounded transfer chunk size in MiB",
+            callback=_validate_chunk_size_mib,
         ),
     ] = DEFAULT_CHUNK_SIZE / (1024 * 1024),
     resume: Annotated[
@@ -185,6 +214,7 @@ def download(
         typer.Option(
             "--chunk-size-mib",
             help="Bounded transfer chunk size in MiB",
+            callback=_validate_chunk_size_mib,
         ),
     ] = DEFAULT_CHUNK_SIZE / (1024 * 1024),
     resume: Annotated[
