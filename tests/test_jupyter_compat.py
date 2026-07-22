@@ -166,3 +166,14 @@ def test_channel_readiness_error_is_not_misreported_as_timeout():
 
     with pytest.raises(RuntimeError, match="channel failed"):
         guarded.wait(timeout=0.1)
+
+
+def test_guard_supports_direct_low_level_websocket_client():
+    original = MagicMock()
+    wsclient = _client()
+    wsclient._message_received = original
+
+    with guard_interactive_timeout(wsclient, allow_stdin=False):
+        assert wsclient._message_received is not original
+
+    assert wsclient._message_received is original

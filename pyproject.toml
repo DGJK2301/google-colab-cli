@@ -58,7 +58,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.6.0.post1"
+fallback-version = "0.7.0rc1"
 
 [tool.hatch.metadata]
 allow-direct-references = true

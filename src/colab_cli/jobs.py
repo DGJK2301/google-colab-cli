@@ -75,8 +75,10 @@ class RemoteJobClient:
             },
         )
 
-    def list_jobs(self) -> list[dict[str, Any]]:
-        return self._call("jobs", {"root": self.job_root})["jobs"]
+    def list_jobs(
+        self, *, timeout: float = DEFAULT_JOB_CONTROL_TIMEOUT
+    ) -> list[dict[str, Any]]:
+        return self._call("jobs", {"root": self.job_root}, timeout=timeout)["jobs"]
 
     def status(
         self,

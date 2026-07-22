@@ -152,6 +152,10 @@ def guard_interactive_timeout(
 
     manager = getattr(kernel_client, "_manager", None)
     wsclient = getattr(manager, "client", None)
+    if wsclient is None and hasattr(kernel_client, "_message_received"):
+        # Observation connects a low-level client only after an exact existing
+        # kernel ID has been selected, avoiding high-level kernel creation.
+        wsclient = kernel_client
     if wsclient is None:
         yield
         return

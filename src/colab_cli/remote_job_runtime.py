@@ -287,6 +287,23 @@ def _pid_alive(pid, expected_start_token=None):
         return False
 
 
+def _safe_file_size(path):
+    try:
+        return os.path.getsize(path) if os.path.isfile(path) else 0
+    except OSError:
+        return None
+
+
+def _with_log_sizes(status, job_dir):
+    stdout_path = status.get("stdout_path") or os.path.join(job_dir, "stdout.log")
+    stderr_path = status.get("stderr_path") or os.path.join(job_dir, "stderr.log")
+    status["stdout_path"] = stdout_path
+    status["stderr_path"] = stderr_path
+    status["stdout_size"] = _safe_file_size(stdout_path)
+    status["stderr_size"] = _safe_file_size(stderr_path)
+    return status
+
+
 def _status(root, job_id):
     job_dir = _job_dir(root, job_id)
     status_path = os.path.join(job_dir, "status.json")
@@ -311,7 +328,7 @@ def _status(root, job_id):
         )
         _atomic_json(status_path, status)
         status["job_dir"] = job_dir
-        return status
+        return _with_log_sizes(status, job_dir)
     runner_start_token = status.get("runner_start_token") or launcher.get(
         "runner_start_token"
     )
@@ -332,7 +349,7 @@ def _status(root, job_id):
             )
             _atomic_json(status_path, status)
     status["job_dir"] = job_dir
-    return status
+    return _with_log_sizes(status, job_dir)
 
 
 def _submit(payload):

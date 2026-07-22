@@ -116,3 +116,12 @@ def test_job_client_status_and_tail_accept_explicit_control_timeout():
     jobs.tail("train", timeout=12.0)
 
     assert [timeout for _, timeout in executor.codes] == [45.0, 12.0]
+
+
+def test_job_client_list_jobs_accepts_explicit_control_timeout():
+    executor = FakeExecutor([{"jobs": []}])
+    jobs = RemoteJobClient(executor)
+
+    assert jobs.list_jobs(timeout=17.0) == []
+
+    assert executor.codes[0][1] == 17.0

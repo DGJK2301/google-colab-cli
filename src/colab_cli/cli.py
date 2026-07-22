@@ -42,6 +42,10 @@ class AlphabeticalGroup(TyperGroup):
     `colab help` benefit from a deterministic, alphabetical listing.
     """
 
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        ctx.meta["colab_cli_raw_args"] = tuple(args)
+        return super().parse_args(ctx, args)
+
     def list_commands(self, ctx: click.Context) -> list[str]:
         return sorted(super().list_commands(ctx))
 
@@ -123,7 +127,11 @@ def callback(
         "wait",
         "cancel",
     }
-    if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED:
+    raw_args = ctx.meta.get("colab_cli_raw_args", ())
+    machine_output = (
+        ctx.invoked_subcommand in {"sessions", "status"} and "--json" in raw_args
+    )
+    if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED and not machine_output:
         auto_update.run_background_check()
 
 

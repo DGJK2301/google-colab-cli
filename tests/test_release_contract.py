@@ -36,7 +36,7 @@ def test_published_metadata_pins_transport_and_dependency_floors():
     assert "pyzmq>=26.0.0" in dependencies
     assert "rpds-py>=0.25.0" in dependencies
     assert project["project"]["scripts"]["colab"] == "colab_cli.entrypoint:main"
-    assert project["tool"]["hatch"]["version"]["fallback-version"] == ("0.6.0.post1")
+    assert project["tool"]["hatch"]["version"]["fallback-version"] == ("0.7.0rc1")
     assert project["tool"]["hatch"]["metadata"]["allow-direct-references"] is True
     assert "sources" not in project["tool"]["uv"]
 

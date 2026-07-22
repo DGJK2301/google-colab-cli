@@ -43,6 +43,27 @@ environment over installing into an existing Jupyter/ML environment.
 - **`colab new` pre-flights the keep-alive RPC** right after allocating. If your token lacks the `colaboratory` scope it unassigns the fresh VM (so you don't leak a billable assignment) and prints the exact remediation. Follow that message rather than retrying blindly.
 - **Do NOT confuse `colab auth` with CLI authentication.** `colab auth` injects *VM-side* GCP credentials into the running kernel (so notebook code can call BigQuery/GCS); it is orthogonal to how the CLI itself authenticates. Never suggest "run `colab auth`" to fix a CLI 401/403 — that's a scope/identity problem fixed via the `gcloud` command above.
 
+## Machine-readable observation
+
+Use the JSON commands when another tool or agent will consume the result:
+
+```bash
+colab sessions --json
+colab status -s <name> --json
+colab status -s <name> --probe --json --timeout 20
+colab jobs -s <name> --json
+```
+
+- JSON stdout contains one versioned document; do not parse the human tables.
+- `--probe` requires an explicit session and never allocates, restarts, releases,
+  mounts Drive, installs packages, or creates a kernel.
+- Requested accelerator, server assignment, and runtime-observed GPU are
+  separate fields. Do not collapse them.
+- Missing resource fields and compute-unit data are `null` with explicit
+  reasons. Do not substitute guessed values.
+- A `partial` result can still contain valid resource data from another source;
+  inspect `warnings`, `errors`, and `probe.issues` before deciding to retry.
+
 ## Workflow
 
 ### Provision

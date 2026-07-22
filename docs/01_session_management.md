@@ -55,8 +55,33 @@ The CLI maps user flags to these backend parameters:
 - **Ownership and rollback**: A requested name that already exists in local state is rejected before assignment. After a successful assignment, local initialization is a transaction: state persistence, keep-alive startup, and history recording must all complete. Any failure stops the newly created daemon when applicable, removes partial state, and unassigns that endpoint without replacing the original exception.
 
 ### 2. Session Status (`colab status`)
-- **API**: `/api/sessions` or querying the kernel for resource usage via a special "status" message.
-- **Metric Collection**: Execute a small snippet on the VM to get memory/CPU usage if the backend API doesn't provide it directly.
+
+Human output preserves the historical `sync_sessions()` behavior. Structured
+output is deliberately separate:
+
+```bash
+colab sessions --json
+colab status -s NAME --json
+colab status -s NAME --probe --json --timeout 20
+```
+
+`colab.sessions.v1` joins local state and the server assignment list without
+pruning either side. `colab.status.v1` can select one local session. Probe mode
+requires that explicit selection and consumes one total wall-clock deadline.
+
+Probe order:
+
+1. Read the existing runtime's `/api/colab/resources` endpoint for RAM, disk,
+   GPU identity, GPU memory, and utilization.
+2. If local state already contains a `kernel_id`, connect directly to that
+   exact kernel and execute one aggregate supplemental request for driver,
+   temperature, `/content` disk, boot ID, Python version, and platform.
+3. Merge sources field-by-field. A failed supplemental request does not discard
+   resource endpoint data.
+
+The probe never allocates a runtime, creates a kernel, restarts or releases the
+session, mounts Drive, installs packages, or starts a job. Missing metrics are
+`null` with explicit issues/unavailable reasons.
 
 ### 3. Stop Session (`colab stop`)
 - **API**: `POST https://colab.sandbox.google.com/tun/m/unassign/<endpoint>` (based on `tpu-v5e1-unassign.har`).

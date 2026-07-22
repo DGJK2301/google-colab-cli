@@ -28,6 +28,14 @@ from colab_cli.accelerators import (
     resolve_accelerator,
 )
 from colab_cli.client import ColabRequestError, PostAssignmentResponse
+from colab_cli.observability import (
+    DEFAULT_PROBE_TIMEOUT,
+    collect_sessions,
+    collect_status,
+    emit_json,
+    machine_diagnostics_to_stderr,
+    validate_probe_timeout,
+)
 from colab_cli.runtime import ColabRuntime
 from colab_cli.state import SessionState
 from colab_cli.utils import get_status_code
@@ -331,9 +339,21 @@ def restart_kernel(
         runtime.stop()
 
 
-def sessions_command():
+def sessions_command(
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the stable colab.sessions.v1 schema")
+    ] = False,
+):
     """List all active sessions"""
     from colab_cli.common import state
+
+    if json_output:
+        with machine_diagnostics_to_stderr():
+            envelope = collect_sessions(state)
+        emit_json(envelope)
+        if not envelope.ok:
+            raise typer.Exit(1)
+        return
 
     sessions, assignments = state.sync_sessions()
     if not assignments:
@@ -375,13 +395,55 @@ def _print_status_for(s: SessionState) -> None:
         typer.echo(f"  Last Execution: {exec_file}{cell_str} at {exec_time}")
 
 
+def _probe_timeout_callback(value: float) -> float:
+    try:
+        return validate_probe_timeout(value)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
 def status(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the stable colab.status.v1 schema")
+    ] = False,
+    probe: Annotated[
+        bool,
+        typer.Option(
+            "--probe",
+            help="Probe one existing session without allocating or restarting it",
+        ),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            help="Total wall-clock budget for --probe in seconds",
+            callback=_probe_timeout_callback,
+        ),
+    ] = DEFAULT_PROBE_TIMEOUT,
 ):
     """Show session status"""
+    if probe and not json_output:
+        raise typer.BadParameter("--probe requires --json", param_hint="--probe")
+    if probe and session is None:
+        raise typer.BadParameter(
+            "--probe requires one explicit -s/--session", param_hint="--probe"
+        )
+
     from colab_cli.common import state
+
+    if json_output:
+        with machine_diagnostics_to_stderr():
+            envelope = collect_status(
+                state, session_name=session, probe=probe, timeout=timeout
+            )
+        emit_json(envelope)
+        if not envelope.ok:
+            raise typer.Exit(1)
+        return
 
     local_sessions, _ = state.sync_sessions()
     if session:

@@ -24,6 +24,7 @@ Designed to support seamless developer productivity, headless automation, and AI
 * **Automatic Keep-Alive:** Built-in background daemon automatically prevents idle VM termination, keeping resource allocations active without requiring open browser tabs.
 * **Seamless Workspace Automation:** Mount Google Drive, authenticate Google Cloud Platform (GCP) credentials, and install dependencies with high-performance `uv` package management.
 * **State & Log Archival:** Inspect local session states or export interactive history logs to standard Jupyter Notebooks, Markdown, or structured JSONL.
+* **Structured Observability:** Consume stable JSON for sessions, one-session runtime probes, and persisted jobs without parsing Rich terminal output.
 
 ---
 
@@ -76,8 +77,9 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | Command | Description |
 | --- | --- |
 | `colab new [-s NAME] [--gpu GPU] [--tpu TPU]` | Allocate a new CPU, GPU, or TPU VM runtime |
-| `colab sessions` | List all active sessions currently active on the backend |
-| `colab status [-s NAME]` | Display hardware, status, and local metadata for active sessions |
+| `colab sessions [--json]` | List local and server-visible sessions; JSON mode uses the stable `colab.sessions.v1` schema |
+| `colab status [-s NAME] [--json]` | Display hardware, lifecycle, and local metadata; JSON mode uses `colab.status.v1` |
+| `colab status -s NAME --probe --json [--timeout SEC]` | Bounded read-only probe of one explicit existing runtime |
 | `colab restart-kernel [-s NAME]` | Restart the active session's Jupyter kernel |
 | `colab stop [-s NAME] [--endpoint ENDPOINT]` | Terminate a tracked session, or release an exact untracked server assignment |
 | `colab url [-s NAME] [--open]` | Print or open a browser URL connecting to the active session |
@@ -103,7 +105,7 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | Command | Description |
 | --- | --- |
 | `colab submit [-s NAME] [--name JOB] [--cwd PATH] -- COMMAND...` | Start a detached argv-based command in an existing VM |
-| `colab jobs [-s NAME]` | List persisted remote job states |
+| `colab jobs [-s NAME] [--json]` | List persisted remote job states; JSON mode includes heartbeat, exit/error, and log sizes |
 | `colab tail JOB [-s NAME] [--stream stdout\|stderr] [--offset N]` | Read one bounded log chunk and report the next byte offset |
 | `colab wait JOB [-s NAME] [--timeout SEC]` | Reattach, stream both logs, and return the remote exit code |
 | `colab cancel JOB [-s NAME] [--grace-seconds SEC]` | Stop a remote job with bounded graceful termination |
@@ -161,6 +163,22 @@ colab jobs -s trainer
 colab wait train -s trainer --timeout 21600
 ```
 
+For automation and a local resource history, keep stdout as one JSON document:
+
+```bash
+colab sessions --json
+colab status -s trainer --json
+colab status -s trainer --probe --json --timeout 20
+colab jobs -s trainer --json
+```
+
+`--probe` requires one explicit `-s/--session`. It first reads the existing
+runtime resource endpoint and only uses the already-recorded kernel ID for one
+aggregate supplemental probe. It never allocates, restarts, releases, mounts,
+installs, or creates a kernel. Missing metrics are represented as `null` plus an
+unavailable reason. Compute-unit balance and rate are not inferred in
+Structured Observability v1.
+
 ### Workspace Notebook Execution with Drive Integration
 
 Mount Google Drive, run a local notebook against the VM kernel (outputs are written back into `report_output.ipynb`), export a Markdown log of the execution, and clean up:
@@ -182,6 +200,7 @@ colab stop -s analysis
 * **Storage & State Paths:** Session tokens and metadata are stored at `~/.config/colab-cli/sessions.json`. Global CLI settings are located at `~/.config/colab-cli/settings.json`. These can be customized or isolated via the global `--config` flag.
 * **Bulk Data:** CLI file transfer is designed for source bundles, checkpoints, and diagnostics. Keep multi-gigabyte datasets in Drive/GCS and localize them inside the VM.
 * **Job Failure Boundary:** Persistent jobs survive local CLI disconnects, not Colab VM reclamation. A new VM cannot resume the old process; preserved status is reported as `lost`.
+* **Observation Boundary:** JSON observation is read-only with respect to CLI state and runtime allocation. Connecting to an existing runtime may still count as activity on the Colab service, but it does not create or renew an assignment.
 * **Execution Timeout Boundary:** `exec --timeout` and `run --timeout` limit how long the local client waits for one kernel execution. Expiry returns exit code `124`; it does not prove that an existing remote kernel stopped. Use `submit`/`wait` for long training.
 * **Accelerator Validation:** Accelerator names are exact and fail closed. A typo such as `--gpu T44`, or passing both `--gpu` and `--tpu`, exits before any VM allocation request.
 * **Allocation Errors:** HTTP 412 is reported as an ambiguous usage/entitlement/capacity rejection, not as proof of too many active assignments.

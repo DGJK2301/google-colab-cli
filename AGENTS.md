@@ -45,6 +45,31 @@
   against its declared base, a source archive, a Git bundle, test evidence, and
   SHA-256 checksums before work begins on the next version.
 
+## Structured Observability v1 Contracts
+
+- **Read-only join:** `sessions --json` and `status --json` read
+  `StateStore.list()` and server assignments directly. They must not call
+  `sync_sessions()`, prune state, stop keep-alive processes, or write history.
+- **Single-document stdout:** machine mode writes exactly one versioned JSON
+  document to stdout. Dependency/auth diagnostics, warnings, and debug logging
+  belong on stderr or inside structured issue arrays.
+- **Explicit probe target:** `--probe` requires both `--json` and one explicit
+  `-s/--session`. There is no implicit probe-all mode.
+- **No allocation path:** probes may read `/api/colab/resources` and connect to
+  an exact recorded `kernel_id`; they must not call assignment, kernel-create,
+  restart, release, Drive mount, package installation, or job submission.
+- **Bounded partial results:** every network/kernel stage consumes a shared
+  wall-clock deadline. One failed metric source returns `partial`,
+  `unavailable`, or `timeout`; it must not erase metrics obtained from another
+  source.
+- **Requested vs observed:** local requested accelerator, server-assigned
+  accelerator/shape, and runtime-observed GPU model are separate fields.
+- **No cost inference:** compute-unit balance/rate remain `null` with an
+  unavailable reason until a separately reviewed official control-plane
+  implementation exists.
+- **Secret exclusion:** JSON must never contain OAuth credentials, runtime proxy
+  tokens, authorization headers, or environment secret values.
+
 ## Core Mandates
 - **Minimalism**: Favor standard library where possible (e.g., `urllib`) while utilizing `Typer` for CLI ergonomics.
 - **Piping**: Always consider piped input (`stdin`) vs. interactive TTY.

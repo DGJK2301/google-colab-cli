@@ -32,6 +32,7 @@ colab submit -s work --name train --cwd /content/project -- \
   python -u train.py --config configs/run.yaml
 
 colab jobs -s work
+colab jobs -s work --json
 colab tail train -s work --stream stdout --offset 0
 colab wait train -s work --timeout 21600
 # After a previous bounded read, resume each stream without replaying old logs.
@@ -81,6 +82,10 @@ the same transaction without that retry path.
   30 seconds or extend a shorter one.
 - `cancel` signals the runner process group, waits for a bounded grace period,
   then force-stops it if necessary.
+- `jobs --json` emits `colab.jobs.v1` and includes persisted state,
+  `heartbeat_at`, return code, error text, and current stdout/stderr byte sizes.
+  It selects a local session without calling the mutating synchronization path
+  and connects only to its recorded existing kernel.
 
 The VM remains the failure boundary. Stopping/reclaiming the Colab runtime ends
 the process. A job root on Drive may preserve logs, but runtime identity makes

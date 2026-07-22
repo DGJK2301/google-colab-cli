@@ -108,6 +108,10 @@ def test_job_runtime_persists_status_logs_and_exit_code(tmp_path):
     assert status["state"] == "succeeded"
     assert status["returncode"] == 0
     assert status["runner_pid"] > 0
+    assert status["stdout_path"].endswith("stdout.log")
+    assert status["stderr_path"].endswith("stderr.log")
+    assert status["stdout_size"] > 0
+    assert status["stderr_size"] > 0
     stdout = dispatch(
         "tail",
         {
@@ -168,3 +172,16 @@ def test_job_runtime_rejects_path_traversal_job_id(tmp_path):
         assert "job_id" in str(exc)
     else:
         raise AssertionError("path-traversal job id was accepted")
+
+
+def test_safe_file_size_is_fail_soft_when_file_disappears(mocker, tmp_path):
+    path = tmp_path / "stdout.log"
+    path.write_text("data", encoding="utf-8")
+    mocker.patch.object(remote_job_runtime.os.path, "isfile", return_value=True)
+    mocker.patch.object(
+        remote_job_runtime.os.path,
+        "getsize",
+        side_effect=OSError("file disappeared"),
+    )
+
+    assert remote_job_runtime._safe_file_size(str(path)) is None

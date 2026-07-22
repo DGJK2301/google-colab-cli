@@ -32,6 +32,16 @@ from colab_cli.jobs import (
     JobTail,
     RemoteJobClient,
 )
+from colab_cli.observability import (
+    SessionSelectionError,
+    emit_json,
+    jobs_error_envelope,
+    machine_diagnostics_to_stderr,
+    normalize_jobs,
+    open_existing_kernel_executor,
+    redact_text,
+    resolve_local_session_read_only,
+)
 from colab_cli.remote import open_remote_executor
 
 
@@ -198,8 +208,68 @@ def list_jobs(
     job_root: Annotated[
         str, typer.Option("--job-root", help="Remote job state directory")
     ] = DEFAULT_JOB_ROOT,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the stable colab.jobs.v1 schema")
+    ] = False,
 ):
     """List persistent jobs in a session"""
+    if json_output:
+        from colab_cli.common import state
+
+        secrets: tuple[str, ...] = ()
+        try:
+            with machine_diagnostics_to_stderr():
+                remote_session = resolve_local_session_read_only(state, session)
+                secrets = (remote_session.token,)
+                with open_existing_kernel_executor(
+                    remote_session,
+                    connect_timeout=min(5.0, DEFAULT_JOB_CONTROL_TIMEOUT),
+                ) as executor:
+                    records = RemoteJobClient(executor, job_root=job_root).list_jobs(
+                        timeout=DEFAULT_JOB_CONTROL_TIMEOUT
+                    )
+                envelope = normalize_jobs(
+                    session=remote_session, job_root=job_root, records=records
+                )
+            emit_json(envelope)
+            return
+        except SessionSelectionError as error:
+            envelope = jobs_error_envelope(
+                session_name=session,
+                job_root=job_root,
+                code=error.code,
+                message=redact_text(error, secrets=secrets),
+            )
+        except LookupError as error:
+            envelope = jobs_error_envelope(
+                session_name=session,
+                job_root=job_root,
+                code="EXISTING_KERNEL_NOT_RECORDED",
+                message=redact_text(error, secrets=secrets),
+            )
+        except TimeoutError as error:
+            envelope = jobs_error_envelope(
+                session_name=session,
+                job_root=job_root,
+                code="JOBS_QUERY_TIMEOUT",
+                message=redact_text(
+                    str(error) or "Remote jobs query timed out.",
+                    secrets=secrets,
+                ),
+            )
+        except Exception as error:
+            envelope = jobs_error_envelope(
+                session_name=session,
+                job_root=job_root,
+                code="JOBS_QUERY_FAILED",
+                message=redact_text(
+                    f"{type(error).__name__}: {error}",
+                    secrets=secrets,
+                ),
+            )
+        emit_json(envelope)
+        raise typer.Exit(1)
+
     executor = None
     try:
         _, executor, client = _open_client(session, job_root)

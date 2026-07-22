@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The package version is derived from the git tag via `hatch-vcs`; each release
 below corresponds to a tag of the same name.
 
+## [0.7.0rc1] - 2026-07-22
+
+### Added
+
+- Add stable `colab.sessions.v1`, `colab.status.v1`, and `colab.jobs.v1`
+  machine-readable contracts through `sessions --json`, `status --json`, and
+  `jobs --json`.
+- Add bounded `status -s NAME --probe --json --timeout SEC` observation for one
+  explicitly selected existing runtime. The probe reports requested and
+  assigned accelerators separately, then gathers GPU, VRAM, utilization,
+  temperature, RAM, `/content` disk, runtime boot identity, Python version, and
+  elapsed probe time when those sources are available.
+- Read Colab's runtime resource endpoint before using one aggregate supplemental
+  request on an already-recorded kernel. The observation path never allocates,
+  restarts, releases, mounts, installs, or creates a kernel.
+- Include persisted job heartbeat, return code, error, stdout size, and stderr
+  size in structured job listings.
+
+### Changed
+
+- JSON observation commands use a read-only state join instead of
+  `sync_sessions()`, so status collection cannot prune local state, kill a
+  keep-alive process, or write history.
+- Redirect dependency/auth diagnostics to stderr while keeping JSON stdout to
+  exactly one document. Compute-unit fields are explicitly `null` with an
+  unavailable reason; this release does not infer account balance or rates.
+- Extend the existing Jupyter timeout guard to direct connections to an exact
+  recorded kernel ID used by read-only observation.
+
 ## [0.6.0.post1] - 2026-07-21
 
 ### Fixed
@@ -88,3 +117,5 @@ below corresponds to a tag of the same name.
 [0.6.0]: https://github.com/googlecolab/google-colab-cli/compare/v0.5.11...v0.6.0
 
 [0.6.0.post1]: https://github.com/DGJK2301/google-colab-cli/compare/514db7e032a3e93bba9586cab8fcf00d37d1dd96...v0.6.0.post1
+
+[0.7.0rc1]: https://github.com/DGJK2301/google-colab-cli/compare/v0.6.0.post1...v0.7.0rc1
