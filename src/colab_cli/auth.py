@@ -17,11 +17,13 @@ import json
 import logging
 from importlib import resources
 import os
+import sys
 import warnings
 from typing import Optional
 
 import google.auth
 import typer
+from google.auth.exceptions import ReauthFailError
 from google.auth.transport import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -50,7 +52,7 @@ class AuthProvider(str, enum.Enum):
 DEFAULT_AUTH_PROVIDER = AuthProvider.OAUTH2
 
 
-# Standard Scopes for Colab and Drive (Public Auth)
+# Standard scopes for Colab and Drive.
 PUBLIC_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.profile",
@@ -86,6 +88,69 @@ def _install_control_plane_retries(session: requests.AuthorizedSession) -> None:
 
 
 TOKEN_CONFIG_PATH = os.path.expanduser("~/.config/colab-cli/token.json")
+CLOUD_SDK_CLIENT_ID = (
+    "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
+)
+REAUTH_SCOPE = "https://www.googleapis.com/auth/accounts.reauth"
+CLOUD_SDK_OAUTH_SCOPES = [*PUBLIC_SCOPES, REAUTH_SCOPE]
+
+
+class ReauthenticationRequiredError(RuntimeError):
+    """Raised when Google requires a human reauthentication challenge."""
+
+
+def _oauth_client_id(client_config: dict) -> Optional[str]:
+    for client_type in ("installed", "web"):
+        section = client_config.get(client_type)
+        if isinstance(section, dict):
+            client_id = section.get("client_id")
+            if isinstance(client_id, str):
+                return client_id
+    return None
+
+
+def _oauth_scopes(client_config: dict) -> list[str]:
+    if _oauth_client_id(client_config) == CLOUD_SDK_CLIENT_ID:
+        return list(CLOUD_SDK_OAUTH_SCOPES)
+    return list(PUBLIC_SCOPES)
+
+
+def _load_authorized_user_credentials(
+    token_path: str,
+    scopes: list[str],
+) -> Credentials:
+    """Load cached user credentials with Cloud SDK reauth support enabled.
+
+    The bundled OAuth configuration uses Google Cloud SDK's public client.
+    Google can require a proof-of-reauthentication token (RAPT) when that
+    client's refresh token is renewed. ``from_authorized_user_file`` restores
+    a cached RAPT token but intentionally leaves interactive reauth disabled,
+    so reconstruct those credentials through the public constructor with the
+    matching flag enabled. Custom OAuth clients retain google-auth's default.
+    """
+
+    loaded = Credentials.from_authorized_user_file(token_path, scopes)
+    if loaded.client_id != CLOUD_SDK_CLIENT_ID:
+        return loaded
+
+    return Credentials(
+        token=loaded.token,
+        refresh_token=loaded.refresh_token,
+        id_token=getattr(loaded, "id_token", None),
+        token_uri=loaded.token_uri,
+        client_id=loaded.client_id,
+        client_secret=loaded.client_secret,
+        scopes=loaded.scopes,
+        quota_project_id=loaded.quota_project_id,
+        expiry=loaded.expiry,
+        rapt_token=loaded.rapt_token,
+        enable_reauth_refresh=True,
+        granted_scopes=getattr(loaded, "granted_scopes", None),
+        trust_boundary=getattr(loaded, "trust_boundary", None),
+        universe_domain=loaded.universe_domain,
+        account=getattr(loaded, "account", None),
+    )
+
 
 # Remote copy-paste OAuth flow.
 #
@@ -115,7 +180,9 @@ def _run_remote_flow(client_config: dict) -> Credentials:
     code for credentials. See ``REMOTE_REDIRECT_URI`` for why this is preferred
     over a localhost server or the blocked OOB flow.
     """
-    flow = InstalledAppFlow.from_client_config(client_config, PUBLIC_SCOPES)
+    flow = InstalledAppFlow.from_client_config(
+        client_config, _oauth_scopes(client_config)
+    )
     flow.redirect_uri = REMOTE_REDIRECT_URI
     auth_url, _ = flow.authorization_url(prompt="consent", token_usage="remote")
 
@@ -151,6 +218,8 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
             "Please provide a valid path via -c/--client-oauth-config."
         )
 
+    oauth_scopes = _oauth_scopes(client_config)
+
     creds = None
 
     # Ensure config directory exists for the token file
@@ -158,9 +227,7 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
 
     if os.path.exists(TOKEN_CONFIG_PATH):
         try:
-            creds = Credentials.from_authorized_user_file(
-                TOKEN_CONFIG_PATH, PUBLIC_SCOPES
-            )
+            creds = _load_authorized_user_credentials(TOKEN_CONFIG_PATH, oauth_scopes)
         except Exception as e:
             logger.warning(f"Failed to load token from {TOKEN_CONFIG_PATH}: {e}")
 
@@ -168,6 +235,18 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
+            except ReauthFailError as e:
+                terminal_hint = (
+                    "Open an interactive terminal and run the same colab "
+                    "command once. Google will request a local reauthentication "
+                    "challenge; the resulting RAPT token is then cached for "
+                    "future silent refreshes."
+                )
+                if not sys.stdin.isatty():
+                    raise ReauthenticationRequiredError(terminal_hint) from e
+                raise ReauthenticationRequiredError(
+                    "Google reauthentication did not complete. " + terminal_hint
+                ) from e
             except Exception as e:
                 logger.warning(f"Failed to refresh token: {e}")
                 creds = None

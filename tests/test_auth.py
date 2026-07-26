@@ -12,15 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
+from google.auth.exceptions import ReauthFailError
 
 from colab_cli.auth import (
+    CLOUD_SDK_CLIENT_ID,
+    CLOUD_SDK_OAUTH_SCOPES,
     DEFAULT_AUTH_PROVIDER,
+    PUBLIC_SCOPES,
+    REAUTH_SCOPE,
     REMOTE_REDIRECT_URI,
     TOKEN_CONFIG_PATH,
     AuthProvider,
+    ReauthenticationRequiredError,
+    _load_authorized_user_credentials,
+    _oauth_scopes,
     get_credentials,
 )
 
@@ -129,6 +138,80 @@ def test_get_credentials_expired_token_refresh(mock_deps):
     assert res == mock_deps["session"].return_value
 
 
+def test_cloud_sdk_cached_token_enables_reauth_refresh(tmp_path):
+    token_path = tmp_path / "token.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "token": "expired-access-token",
+                "refresh_token": "refresh-token",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": CLOUD_SDK_CLIENT_ID,
+                "client_secret": "client-secret",
+                "scopes": ["openid"],
+                "expiry": "2020-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    credentials = _load_authorized_user_credentials(str(token_path), scopes=["openid"])
+
+    assert credentials._enable_reauth_refresh is True
+
+
+def test_custom_oauth_client_does_not_enable_gcloud_reauth(tmp_path):
+    token_path = tmp_path / "token.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "token": "expired-access-token",
+                "refresh_token": "refresh-token",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "custom-client.apps.googleusercontent.com",
+                "client_secret": "client-secret",
+                "scopes": ["openid"],
+                "expiry": "2020-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    credentials = _load_authorized_user_credentials(str(token_path), scopes=["openid"])
+
+    assert credentials._enable_reauth_refresh is False
+
+
+def test_noninteractive_reauth_failure_does_not_restart_consent_flow(mock_deps, mocker):
+    mock_deps["exists"].side_effect = lambda path: (
+        path
+        in {
+            "dummy_config.json",
+            TOKEN_CONFIG_PATH,
+        }
+    )
+    mock_creds = MagicMock(
+        valid=False,
+        expired=True,
+        refresh_token="refresh-token",
+    )
+    mock_creds.refresh.side_effect = ReauthFailError(
+        "interactive challenge unavailable"
+    )
+    mock_deps["creds_cls"].from_authorized_user_file.return_value = mock_creds
+    mocker.patch("colab_cli.auth.sys.stdin.isatty", return_value=False)
+    remote_flow = mocker.patch("colab_cli.auth._run_remote_flow")
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        with pytest.raises(
+            ReauthenticationRequiredError,
+            match="interactive terminal",
+        ):
+            get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    remote_flow.assert_not_called()
+
+
 def test_get_credentials_no_token(mock_deps, mocker):
     """With no cached token, the remote copy-paste flow runs and exchanges code."""
     mock_deps["exists"].side_effect = lambda path: path == "dummy_config.json"
@@ -188,3 +271,20 @@ def test_get_credentials_fallback_config(mock_deps):
 
 def test_default_auth_provider_is_public_oauth():
     assert DEFAULT_AUTH_PROVIDER is AuthProvider.OAUTH2
+
+
+def test_cloud_sdk_public_scopes_include_reauthentication():
+    assert REAUTH_SCOPE in CLOUD_SDK_OAUTH_SCOPES
+    assert REAUTH_SCOPE not in PUBLIC_SCOPES
+
+
+def test_cloud_sdk_flow_requests_reauthentication_scope():
+    config = {"installed": {"client_id": CLOUD_SDK_CLIENT_ID}}
+
+    assert _oauth_scopes(config) == CLOUD_SDK_OAUTH_SCOPES
+
+
+def test_custom_oauth_flow_does_not_request_cloud_sdk_reauthentication_scope():
+    config = {"installed": {"client_id": "custom-client.apps.googleusercontent.com"}}
+
+    assert _oauth_scopes(config) == PUBLIC_SCOPES

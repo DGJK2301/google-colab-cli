@@ -44,6 +44,22 @@ backend, selected via the global `--auth=<provider>` flag:
     `redirect_uri_mismatch`. If no local config is provided via
     `-c/--client-oauth-config` or found at `~/.colab-cli-oauth-config.json`,
     it falls back to that bundled `oauth_config.json`.
+
+    Access tokens normally expire after about one hour; the cached refresh
+    token is used automatically and does not require repeating browser
+    consent. Because the bundled client is Google Cloud SDK's public OAuth
+    client, Google can additionally require proof of reauthentication (RAPT).
+    The CLI requests the standard `accounts.reauth` scope, enables
+    google-auth's Cloud SDK reauth flow for this client only, and persists the
+    returned `rapt_token`. A password, security-key, or organization challenge
+    must be completed in an interactive local terminal and cannot be bypassed.
+    Workspace session policy, token revocation, or an expired RAPT session can
+    still require later human reauthentication.
+
+    The official Colab VS Code extension uses the same basic lifecycle with a
+    different client and store: it keeps its refresh token in VS Code
+    `SecretStorage`, refreshes just in time, and clears the session on
+    `invalid_grant`. This CLI does not read or copy VS Code credentials.
 2.  **`adc`**: Application Default Credentials via `google.auth.default()`.
     Honors the standard ADC discovery chain
     (`GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default
@@ -72,10 +88,11 @@ sufficient for this host.
 
 How each provider supplies the scope:
 
--   **`oauth2`**: `PUBLIC_SCOPES` already includes `colaboratory`, so the
-    InstalledAppFlow consent screen lists it. Existing cached tokens at
-    `~/.config/colab-cli/token.json` that were minted before this change must
-    be deleted to trigger a fresh consent flow.
+-   **`oauth2`**: `PUBLIC_SCOPES` includes `colaboratory`; when the bundled
+    Cloud SDK client is used, the flow additionally requests
+    `accounts.reauth`. A cached token minted before this change is upgraded by
+    one new consent flow when Google rejects its old scope set; it does not
+    need to be deleted manually.
 -   **`adc`**: `google.auth.default(scopes=PUBLIC_SCOPES)` is called, and for
     credential subclasses that support `with_scopes` (service accounts,
     GCE/GKE metadata, impersonated) we re-apply via `creds.with_scopes(...)`.

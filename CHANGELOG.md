@@ -36,6 +36,9 @@ below corresponds to a tag of the same name.
   unavailable reason; this release does not infer account balance or rates.
 - Extend the existing Jupyter timeout guard to direct connections to an exact
   recorded kernel ID used by read-only observation.
+- Enable Google Auth's Cloud SDK reauthentication flow for the bundled OAuth
+  client, request `accounts.reauth`, cache the resulting RAPT token, and keep
+  custom OAuth clients and ADC on their existing scope behavior.
 
 ## [0.6.0.post1] - 2026-07-21
 
