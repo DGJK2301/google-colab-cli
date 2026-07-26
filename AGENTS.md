@@ -100,6 +100,37 @@
   diagnostics. Do not turn it into a 20 GB dataset synchronization system or a
   remote transfer daemon.
 
+## Operational Recovery v1 Contracts
+
+- **Doctor is local by default:** `colab doctor` must not authenticate, query the
+  backend, connect a runtime, create a kernel, or allocate resources unless the
+  caller explicitly adds `--network`.
+- **Metadata, never credentials:** doctor reports token existence, expiry,
+  scopes, refresh/RAPT presence, and permission posture; it never serializes
+  token, refresh-token, RAPT, cookie, or authorization-header values.
+- **Strict recovery state:** doctor and attach use strict session-store parsing.
+  An unreadable store is an error, not an empty dictionary that may be
+  overwritten.
+- **Monitor is foreground and resumable:** one output directory has one local
+  monitor writer. Persist byte offsets atomically and append raw stdout/stderr
+  without framework-specific classification.
+- **Terminal means locally drained:** do not propagate a terminal remote exit
+  code until the monitor has copied all currently reported stdout/stderr bytes.
+- **Probe failure is evidence, not cancellation:** a timeout or missing GPU
+  sample is appended to `resources.jsonl`; it must not cancel or fail the
+  remote job.
+- **Ctrl+C is local-only:** interrupting monitor exits 130 and explicitly records
+  `remote_job_cancelled=false`.
+- **Runtime binding:** bind monitor state to session endpoint, persisted remote
+  runtime ID, and probed boot ID. A change fails closed instead of joining
+  evidence from a replacement VM.
+- **Attach never allocates or releases:** endpoint must be present in the current
+  account assignment list. Local setup failure rolls back local state and
+  keep-alive only; it must never call `unassign`.
+- **Attach is usable immediately:** default attach establishes and persists a
+  bounded control kernel before success, then starts keep-alive. `--no-connect`
+  is an explicit deferred-control escape hatch.
+
 ## Core Mandates
 - **Minimalism**: Favor standard library where possible (e.g., `urllib`) while utilizing `Typer` for CLI ergonomics.
 - **Piping**: Always consider piped input (`stdin`) vs. interactive TTY.

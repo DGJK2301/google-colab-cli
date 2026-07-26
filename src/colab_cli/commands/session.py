@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from contextlib import nullcontext
 import os
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from typing import Any, Dict, Optional
 import typer
 from typing_extensions import Annotated
 
+from colab_cli.attach_models import AttachEnvelope, AttachError
 from colab_cli.accelerators import (
     AcceleratorArgumentError,
     format_assignment_error,
@@ -34,8 +36,11 @@ from colab_cli.observability import (
     collect_status,
     emit_json,
     machine_diagnostics_to_stderr,
+    redact_text,
     validate_probe_timeout,
 )
+from colab_cli.observability.collector import utc_now
+from colab_cli.remote import open_remote_executor
 from colab_cli.runtime import ColabRuntime
 from colab_cli.state import SessionState
 from colab_cli.utils import get_status_code
@@ -43,6 +48,10 @@ from colab_cli.utils import get_status_code
 
 logger = logging.getLogger(__name__)
 _ORPHAN_HISTORY_SESSION = "_orphan_assignments"
+
+
+class InvalidAttachedSessionName(ValueError):
+    pass
 
 
 def _is_scope_error(e: Exception) -> bool:
@@ -285,6 +294,7 @@ def new(
             name,
             auth_provider=state.auth_provider,
             config_path=state.config_path,
+            client_oauth_config=state.client_oauth_config,
         )
         state.store.add(s)
         state.history.log_event(
@@ -303,6 +313,339 @@ def new(
         raise
 
     typer.echo("[colab] Session READY.")
+
+
+def _validate_attached_session_name(name: str) -> str:
+    value = name.strip()
+    if not value:
+        raise InvalidAttachedSessionName("session name must not be empty")
+    if len(value) > 128:
+        raise InvalidAttachedSessionName("session name must be 128 characters or fewer")
+    if any(ord(char) < 32 for char in value):
+        raise InvalidAttachedSessionName("session name contains a control character")
+    if any(char in value for char in '<>:"/\\|?*'):
+        raise InvalidAttachedSessionName(
+            "session name contains a Windows-unsafe filename character"
+        )
+    if value.endswith((" ", ".")):
+        raise InvalidAttachedSessionName(
+            "session name must not end with a space or dot"
+        )
+    reserved = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    if value.split(".", 1)[0].upper() in reserved:
+        raise InvalidAttachedSessionName("session name is reserved on Windows")
+    return value
+
+
+def _emit_attach_result(
+    envelope: AttachEnvelope,
+    *,
+    json_output: bool,
+) -> None:
+    if json_output:
+        emit_json(envelope)
+        return
+    if envelope.ok:
+        typer.echo(
+            f"[colab] Attached '{envelope.session_name}' "
+            f"to {envelope.endpoint} "
+            f"({envelope.accelerator or 'UNKNOWN'}, "
+            f"{envelope.variant or 'UNKNOWN'})."
+        )
+        for warning in envelope.warnings:
+            typer.echo(
+                f"[colab] Warning: {warning}",
+                err=True,
+            )
+        return
+    message = envelope.error.message if envelope.error else "unknown error"
+    typer.echo(
+        f"[colab] Attach failed: {message}",
+        err=True,
+    )
+
+
+def attach(
+    endpoint: Annotated[
+        str,
+        typer.Option(
+            "--endpoint",
+            help="Exact endpoint from `colab sessions --json`",
+        ),
+    ],
+    session: Annotated[
+        str,
+        typer.Option(
+            "-s",
+            "--session",
+            help="New local session name",
+        ),
+    ],
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit the stable colab.attach.v1 schema",
+        ),
+    ] = False,
+    connect: Annotated[
+        bool,
+        typer.Option(
+            "--connect/--no-connect",
+            help=(
+                "Establish and persist a control kernel before reporting attach success"
+            ),
+        ),
+    ] = True,
+):
+    """Adopt an existing assignment without allocating or releasing it."""
+    from colab_cli.common import kill_process, state
+
+    name = session
+    assignment = None
+    local_state = None
+    executor = None
+    spawned_pid = None
+    stored = False
+    control_connected = False
+    warnings: list[str] = []
+    error_code = None
+    error_message = None
+    retryable = None
+
+    try:
+        name = _validate_attached_session_name(session)
+        context = machine_diagnostics_to_stderr() if json_output else nullcontext()
+        with context:
+            local = state.store.list_strict()
+            if name in local:
+                raise RuntimeError(
+                    "SESSION_NAME_CONFLICT: local session name already exists"
+                )
+
+            assignments = state.client.list_assignments(timeout=(5.0, 20.0))
+            assignment = next(
+                (item for item in assignments if item.endpoint == endpoint),
+                None,
+            )
+            if assignment is None:
+                raise LookupError(
+                    "ASSIGNMENT_NOT_FOUND: endpoint is not "
+                    "present in the current account assignment list"
+                )
+
+            conflict = next(
+                (item for item in local.values() if item.endpoint == endpoint),
+                None,
+            )
+            if conflict is not None:
+                raise RuntimeError(
+                    "ENDPOINT_ALREADY_ATTACHED: endpoint is "
+                    f"already tracked as {conflict.name!r}"
+                )
+
+            # This verifies that the backend still accepts keep-alive for the
+            # assignment. It does not allocate or release a runtime.
+            state.client.keep_alive_assignment(endpoint)
+
+            local_state = SessionState(
+                name=name,
+                token=assignment.runtime_proxy_info.token,
+                url=assignment.runtime_proxy_info.url,
+                endpoint=assignment.endpoint,
+                variant=assignment.variant.name,
+                accelerator=assignment.accelerator.value,
+            )
+            # Phase 1: persist recoverable endpoint/token state before any
+            # local process or control-kernel setup can fail.
+            state.store.claim_strict(local_state.model_copy())
+            stored = True
+
+            if connect:
+                executor = open_remote_executor(
+                    local_state,
+                    state.store,
+                    history=state.history,
+                )
+                try:
+                    executor.execute_json(
+                        "_colab_cli_result = {'attached': True}",
+                        timeout=30.0,
+                    )
+                    control_connected = True
+                finally:
+                    try:
+                        executor.close()
+                    except Exception as close_error:
+                        warnings.append(
+                            "control connection closed with warning: "
+                            + redact_text(
+                                close_error,
+                                secrets=(assignment.runtime_proxy_info.token,),
+                            )
+                        )
+                    executor = None
+            else:
+                warnings.append(
+                    "control connection deferred; the first "
+                    "exec/jobs/monitor command will establish it"
+                )
+
+            spawned_pid = spawn_keep_alive(
+                endpoint,
+                name,
+                auth_provider=state.auth_provider,
+                config_path=state.config_path,
+                client_oauth_config=state.client_oauth_config,
+            )
+            local_state.keep_alive_pid = spawned_pid
+
+            # Phase 2: atomically publish the fully attached local state.
+            state.store.update_claim_strict(local_state.model_copy())
+
+            try:
+                state.history.log_event(
+                    name,
+                    "session_attached",
+                    {
+                        "endpoint": endpoint,
+                        "variant": assignment.variant.name,
+                        "accelerator": (assignment.accelerator.value),
+                        "machine_shape": (assignment.machine_shape.name),
+                        "control_connected": control_connected,
+                        "kernel_id": local_state.kernel_id,
+                        "session_id": local_state.session_id,
+                    },
+                )
+            except Exception as exc:
+                warnings.append(
+                    "assignment attached but history write failed: "
+                    + redact_text(
+                        exc,
+                        secrets=(assignment.runtime_proxy_info.token,),
+                    )
+                )
+
+    except Exception as exc:
+        secret = assignment.runtime_proxy_info.token if assignment is not None else ""
+        safe = redact_text(
+            f"{type(exc).__name__}: {exc}",
+            secrets=(secret,),
+        )
+        raw = str(exc)
+        if "SESSION_NAME_CONFLICT:" in raw:
+            error_code, retryable = (
+                "SESSION_NAME_CONFLICT",
+                False,
+            )
+        elif "ENDPOINT_ALREADY_ATTACHED:" in raw:
+            error_code, retryable = (
+                "ENDPOINT_ALREADY_ATTACHED",
+                False,
+            )
+        elif "ASSIGNMENT_NOT_FOUND:" in raw:
+            error_code, retryable = (
+                "ASSIGNMENT_NOT_FOUND",
+                True,
+            )
+        elif isinstance(exc, InvalidAttachedSessionName):
+            error_code, retryable = (
+                "INVALID_SESSION_NAME",
+                False,
+            )
+        else:
+            error_code, retryable = (
+                "ATTACH_LOCAL_SETUP_FAILED",
+                True,
+            )
+        error_message = safe.split(": ", 1)[-1]
+
+        if executor is not None:
+            try:
+                executor.close()
+            except Exception as cleanup_error:
+                warnings.append(
+                    "control connection rollback failed: "
+                    + redact_text(
+                        cleanup_error,
+                        secrets=(secret,),
+                    )
+                )
+
+        if spawned_pid is not None:
+            try:
+                kill_process(spawned_pid)
+            except Exception as cleanup_error:
+                warnings.append(
+                    "keep-alive rollback failed: "
+                    + redact_text(
+                        cleanup_error,
+                        secrets=(secret,),
+                    )
+                )
+
+        if stored and local_state is not None:
+            try:
+                state.store.remove_claim_strict(
+                    name,
+                    local_state.endpoint,
+                )
+            except Exception as cleanup_error:
+                warnings.append(
+                    "local state rollback failed: "
+                    + redact_text(
+                        cleanup_error,
+                        secrets=(secret,),
+                    )
+                )
+
+    if error_code is not None:
+        envelope = AttachEnvelope(
+            ok=False,
+            status="failed",
+            session_name=name,
+            endpoint=endpoint,
+            warnings=warnings,
+            error=AttachError(
+                code=error_code,
+                message=error_message or error_code,
+                retryable=retryable,
+            ),
+        )
+        _emit_attach_result(
+            envelope,
+            json_output=json_output,
+        )
+        raise typer.Exit(1)
+
+    assert assignment is not None
+    assert local_state is not None
+    envelope = AttachEnvelope(
+        ok=True,
+        status="attached",
+        session_name=name,
+        endpoint=endpoint,
+        accelerator=assignment.accelerator.value,
+        variant=assignment.variant.name,
+        machine_shape=assignment.machine_shape.name,
+        keep_alive_pid=local_state.keep_alive_pid,
+        control_connected=control_connected,
+        kernel_id=local_state.kernel_id,
+        session_id=local_state.session_id,
+        attached_at=utc_now(),
+        warnings=warnings,
+    )
+    _emit_attach_result(
+        envelope,
+        json_output=json_output,
+    )
 
 
 def restart_kernel(
@@ -570,13 +913,16 @@ def stop(
 
 
 def spawn_keep_alive(
-    endpoint: str, session_name: str, auth_provider=None, config_path=None
+    endpoint: str,
+    session_name: str,
+    auth_provider=None,
+    config_path=None,
+    client_oauth_config=None,
 ):
     """Spawns a detached keep-alive process.
 
-    Both `auth_provider` and `config_path` are propagated as global flags
-    so the detached child uses the same authentication strategy AND the
-    same session state file as the parent that invoked `colab new`.
+    Authentication and state paths are propagated as global flags so the
+    detached child uses the same strategy and files as its parent.
     Without this, the child inherits Typer's defaults (`--auth=oauth2`,
     `--config=~/.config/colab-cli/sessions.json`), which causes:
       (a) wrong auth backend, and
@@ -589,13 +935,17 @@ def spawn_keep_alive(
         cmd.append(f"--auth={auth_provider.value}")
     if config_path is not None:
         cmd.extend(["--config", config_path])
+    if client_oauth_config is not None:
+        cmd.extend(["--client-oauth-config", client_oauth_config])
     cmd.extend(["keep-alive", endpoint, session_name])
     # Detach process
     kwargs = {}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
     else:
-        # https://stackoverflow.com/questions/1356540/how-can-i-make-a-python-script-run-in-the-background-as-a-service-on-windows
+        # Background-process behavior reference:
+        # https://stackoverflow.com/questions/1356540/
+        # how-can-i-make-a-python-script-run-in-the-background-as-a-service-on-windows
         CREATE_NEW_PROCESS_GROUP = 0x00000200
         DETACHED_PROCESS = 0x00000008
         kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
@@ -693,6 +1043,7 @@ def keep_alive(
 
 def register(app: typer.Typer):
     app.command()(new)
+    app.command()(attach)
     app.command(name="sessions")(sessions_command)
     app.command(name="restart-kernel")(restart_kernel)
     app.command()(status)

@@ -20,6 +20,8 @@ Designed to support seamless developer productivity, headless automation, and AI
 * **Robust Code Execution:** Run local Python scripts, Jupyter Notebooks (`.ipynb`), or piped `stdin` code; launch interactive REPLs or raw TTY console shells.
 * **Ephemeral Job Runner (`colab run`):** Provision a fresh VM, execute a local script with forwarded arguments, retrieve output files, and automatically tear down the runtime in a single command.
 * **Reconnectable Remote Jobs:** Submit detached argv-based commands, persist stdout/stderr and status in the VM, then reattach with `jobs`, `tail`, `wait`, or `cancel` from a later CLI process.
+* **Recoverable Local Monitoring:** Continuously mirror job stdout/stderr, state, and GPU/RAM/disk samples into local append-only evidence that survives a later Colab VM reclamation.
+* **Orphan Assignment Attach:** List every server assignment and transactionally adopt an exact endpoint into a named local session without allocating or releasing it.
 * **Verified Resumable Transfer:** Upload and download bounded chunks with prefix-safe resume, SHA-256 verification, request timeouts, and atomic destination replacement.
 * **Single-writer Transfer Lifecycle:** Cross-process leases protect each destination across inspection, resume, chunks, verification, and commit; Ctrl+C preserves a verified partial and returns an exact resume command.
 * **Automatic Keep-Alive:** Built-in background daemon automatically prevents idle VM termination, keeping resource allocations active without requiring open browser tabs.
@@ -36,10 +38,10 @@ Jupyter transport in published metadata as well as in `uv.lock`:
 
 ```bash
 # Using uv (recommended)
-uv tool install --force "git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
+uv tool install --force "git+https://github.com/DGJK2301/google-colab-cli.git@v0.7.0rc3"
 
 # Using pip
-pip install --force-reinstall "google-colab-cli @ git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
+pip install --force-reinstall "google-colab-cli @ git+https://github.com/DGJK2301/google-colab-cli.git@v0.7.0rc3"
 ```
 
 Do not install this release into an arbitrary shared Jupyter environment when an
@@ -79,6 +81,7 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | --- | --- |
 | `colab new [-s NAME] [--gpu GPU] [--tpu TPU]` | Allocate a new CPU, GPU, or TPU VM runtime |
 | `colab sessions [--json]` | List local and server-visible sessions; JSON mode uses the stable `colab.sessions.v1` schema |
+| `colab attach --endpoint ENDPOINT -s NAME [--json]` | Adopt an exact current-account assignment, establish a control kernel, and start local keep-alive |
 | `colab status [-s NAME] [--json]` | Display hardware, lifecycle, and local metadata; JSON mode uses `colab.status.v1` |
 | `colab status -s NAME --probe --json [--timeout SEC]` | Bounded read-only probe of one explicit existing runtime |
 | `colab restart-kernel [-s NAME]` | Restart the active session's Jupyter kernel |
@@ -110,6 +113,7 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | `colab tail JOB [-s NAME] [--stream stdout\|stderr] [--offset N]` | Read one bounded log chunk and report the next byte offset |
 | `colab wait JOB [-s NAME] [--timeout SEC]` | Reattach, stream both logs, and return the remote exit code |
 | `colab cancel JOB [-s NAME] [--grace-seconds SEC]` | Stop a remote job with bounded graceful termination |
+| `colab monitor JOB -s NAME [--output DIR] [--json]` | Persist resumable logs, job snapshots, resource samples, state, and final summary locally |
 
 ### Automation & Utilities
 | Command | Description |
@@ -118,6 +122,7 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | `colab drivemount [-s NAME] [PATH]` | Mount Google Drive on the VM (default: `/content/drive`) |
 | `colab install [-s NAME] [-r FILE \| PKG...]` | Install packages on the VM using `uv` (falls back to `pip`) |
 | `colab log [-s NAME] [-n N] [-o FILE]` | View or export session history (`.ipynb`, `.md`, `.txt`, `.jsonl`) |
+| `colab doctor [--json] [--network]` | Audit installation, auth cache, local state, keep-alive, transfer leases, and optional assignment connectivity |
 | `colab pay` | Open the Colab subscription page to manage compute units |
 | `colab version` | Print the installed version of the CLI |
 | `colab update [--install]` | Check for a newer release (and optionally upgrade the CLI in place) |
@@ -171,6 +176,9 @@ colab sessions --json
 colab status -s trainer --json
 colab status -s trainer --probe --json --timeout 20
 colab jobs -s trainer --json
+colab doctor --json
+colab monitor train -s trainer --interval 5 --probe-every 60 \
+  --output runs/train --json
 colab upload -s trainer --json repo.bundle content/repo.bundle
 colab download -s trainer --json content/model.ckpt ./model.ckpt
 ```
@@ -211,6 +219,8 @@ colab stop -s analysis
 * **Transfer Ownership:** A second process targeting the same destination fails immediately. Lease files live under `~/.config/colab-cli/transfer-leases` (override with `COLAB_CLI_TRANSFER_LEASE_DIR` for isolated tests).
 * **Transfer Interruption:** Normal Ctrl+C exits 130 after releasing the local lease. The deterministic `.part` remains only when its prefix has already been verified, so the printed resume command can continue safely.
 * **Job Failure Boundary:** Persistent jobs survive local CLI disconnects, not Colab VM reclamation. A new VM cannot resume the old process; preserved status is reported as `lost`.
+* **Monitor Evidence Boundary:** `monitor` copies logs and resource samples to the local machine while the runtime is reachable. Those local files remain after VM reclamation; bytes never copied from `/content` cannot be reconstructed later.
+* **Attach Boundary:** `sessions --json` can expose an orphan server assignment. `attach` adopts only an exact endpoint returned for the current account, never allocates a replacement, and never releases that endpoint when local setup fails.
 * **Observation Boundary:** JSON observation is read-only with respect to CLI state and runtime allocation. Connecting to an existing runtime may still count as activity on the Colab service, but it does not create or renew an assignment.
 * **Execution Timeout Boundary:** `exec --timeout` and `run --timeout` limit how long the local client waits for one kernel execution. Expiry returns exit code `124`; it does not prove that an existing remote kernel stopped. Use `submit`/`wait` for long training.
 * **Accelerator Validation:** Accelerator names are exact and fail closed. A typo such as `--gpu T44`, or passing both `--gpu` and `--tpu`, exits before any VM allocation request.

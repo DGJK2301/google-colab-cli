@@ -402,6 +402,20 @@ def _lease_root(
     return Path(configured or DEFAULT_TRANSFER_LEASE_ROOT).expanduser()
 
 
+def transfer_lease_root(
+    root: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Return the configured transfer-lease metadata root."""
+    return _lease_root(root)
+
+
+def process_existence_state(
+    pid: int,
+) -> Literal["alive", "dead", "unknown"]:
+    """Public fail-closed process existence probe."""
+    return _process_existence_state(pid)
+
+
 def _atomic_json(
     path: Path,
     payload: dict[str, Any],

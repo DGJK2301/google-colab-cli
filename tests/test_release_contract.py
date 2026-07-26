@@ -20,7 +20,7 @@ from colab_cli.state import DEFAULT_UPDATE_URL, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 TRANSPORT_COMMIT = "f18e982c3265df5e923aa9def101ab3fd737e139"
-FORK_RELEASE_SPEC = "git+https://github.com/DGJK2301/google-colab-cli.git@v0.6.0.post1"
+FORK_RELEASE_SPEC = "git+https://github.com/DGJK2301/google-colab-cli.git@v0.7.0rc3"
 
 
 def test_published_metadata_pins_transport_and_dependency_floors():
@@ -36,7 +36,7 @@ def test_published_metadata_pins_transport_and_dependency_floors():
     assert "pyzmq>=26.0.0" in dependencies
     assert "rpds-py>=0.25.0" in dependencies
     assert project["project"]["scripts"]["colab"] == "colab_cli.entrypoint:main"
-    assert project["tool"]["hatch"]["version"]["fallback-version"] == ("0.7.0rc2")
+    assert project["tool"]["hatch"]["version"]["fallback-version"] == ("0.7.0rc3")
     assert project["tool"]["hatch"]["metadata"]["allow-direct-references"] is True
     assert "sources" not in project["tool"]["uv"]
 

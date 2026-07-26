@@ -325,3 +325,57 @@ def test_state_store_multiprocess_concurrency(temp_config):
     assert p1.exitcode == 0
     assert p2.exitcode == 0
     assert len(StateStore(temp_config).list()) == 80
+
+
+def test_claim_strict_atomically_rejects_name_and_endpoint_conflicts(
+    temp_config,
+):
+    store = StateStore(temp_config)
+    original = SessionState(
+        name="first",
+        token="t",
+        url="u",
+        endpoint="endpoint-1",
+    )
+    store.claim_strict(original)
+
+    with pytest.raises(RuntimeError, match="SESSION_NAME_CONFLICT"):
+        store.claim_strict(
+            SessionState(
+                name="first",
+                token="t2",
+                url="u2",
+                endpoint="endpoint-2",
+            )
+        )
+    with pytest.raises(RuntimeError, match="ENDPOINT_ALREADY_ATTACHED"):
+        store.claim_strict(
+            SessionState(
+                name="second",
+                token="t2",
+                url="u2",
+                endpoint="endpoint-1",
+            )
+        )
+
+    assert store.list() == {"first": original}
+
+
+def test_claim_update_and_remove_require_the_same_endpoint(temp_config):
+    store = StateStore(temp_config)
+    claimed = SessionState(
+        name="trainer",
+        token="t",
+        url="u",
+        endpoint="endpoint-1",
+    )
+    store.claim_strict(claimed)
+
+    replacement = claimed.model_copy(update={"keep_alive_pid": 123})
+    store.update_claim_strict(replacement)
+    assert store.get("trainer").keep_alive_pid == 123
+
+    assert not store.remove_claim_strict("trainer", "other-endpoint")
+    assert store.get("trainer") is not None
+    assert store.remove_claim_strict("trainer", "endpoint-1")
+    assert store.get("trainer") is None

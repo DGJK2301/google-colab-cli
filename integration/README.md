@@ -18,6 +18,7 @@ End-to-end tests that run against a **live Colab backend** (unlike the mocked un
 | `repro_piped_console/` | Fast smoke test (~5s including session creation): `echo cmd \| colab console -s s` runs the command and exits within 30s. Regression test for the 2026-05-07 EOF-handler fix. |
 | `repro_bundled_oauth/` | Fast smoke test (~5s): verifies that the fallback OAuth configuration is loaded and starts the OAuth flow with the default client ID when local config is missing. |
 | `repro_resumable_transfer_jobs/` | Windows/free-CPU acceptance for 8/64 MiB verified JSON round trips, 0.25/0.5/1/2 MiB chunk benchmarks, process-leak checks, and detached submit/list/tail/wait/cancel. |
+| `repro_operational_recovery/` | Free-CPU doctor, optional orphan attach, detached job, local monitor evidence, resource probe, exit propagation, and cleanup. |
 
 
 ## Running
@@ -53,6 +54,20 @@ placing credentials in the runtime:
 ```powershell
 pwsh -File integration/repro_resumable_transfer_jobs/test.ps1 `
   -BundleRepo D:\path\to\repository
+```
+
+Run operational recovery against a newly allocated CPU session:
+
+```powershell
+pwsh -File integration/repro_operational_recovery/test.ps1
+```
+
+To validate adoption of a session created in the web UI or another local
+profile, pass the exact endpoint from `colab sessions --json`:
+
+```powershell
+pwsh -File integration/repro_operational_recovery/test.ps1 `
+  -OrphanEndpoint <endpoint>
 ```
 
 ## Adding a scenario

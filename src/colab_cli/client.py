@@ -220,9 +220,21 @@ class Client:
             return
         return TypeAdapter(schema).validate_python(json.loads(body))
 
-    def list_assignments(self) -> List[ListedAssignment]:
-        url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/assignments")
-        assignments = self._issue_request(url, schema=ListedAssignments)
+    def list_assignments(
+        self,
+        *,
+        timeout: float | tuple[float, float] | None = None,
+    ) -> List[ListedAssignment]:
+        url = urljoin(
+            self.colab_domain,
+            f"{TUN_ENDPOINT}/assignments",
+        )
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        assignments = self._issue_request(
+            url,
+            schema=ListedAssignments,
+            **kwargs,
+        )
         return assignments.assignments
 
     def unassign(self, endpoint: str):

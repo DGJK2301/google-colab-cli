@@ -25,9 +25,11 @@ from colab_cli.auth import DEFAULT_AUTH_PROVIDER, AuthProvider
 from colab_cli.common import state, setup_logging
 from colab_cli.commands import (
     automation,
+    doctor,
     execution,
     files,
     jobs,
+    monitor,
     run,
     session,
     utility,
@@ -126,10 +128,22 @@ def callback(
         "tail",
         "wait",
         "cancel",
+        "doctor",
+        "monitor",
+        "attach",
     }
     raw_args = ctx.meta.get("colab_cli_raw_args", ())
     machine_output = (
-        ctx.invoked_subcommand in {"sessions", "status", "upload", "download"}
+        ctx.invoked_subcommand
+        in {
+            "sessions",
+            "status",
+            "upload",
+            "download",
+            "doctor",
+            "attach",
+            "monitor",
+        }
         and "--json" in raw_args
     )
     if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED and not machine_output:
@@ -162,6 +176,8 @@ def help_command(
 
 # Register subcommands
 session.register(app)
+doctor.register(app)
+monitor.register(app)
 execution.register(app)
 files.register(app)
 jobs.register(app)

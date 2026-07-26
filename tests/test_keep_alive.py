@@ -164,6 +164,24 @@ def test_spawn_keep_alive_command_includes_config_path(mocker):
     )
 
 
+def test_spawn_keep_alive_command_includes_oauth_client_config(mocker):
+    from colab_cli.commands.session import spawn_keep_alive
+
+    mock_popen = mocker.patch("colab_cli.commands.session.subprocess.Popen")
+    mock_popen.return_value.pid = 12345
+
+    spawn_keep_alive(
+        "ep1",
+        "sess1",
+        client_oauth_config="C:/config/oauth.json",
+    )
+
+    cmd = mock_popen.call_args.args[0]
+    option_idx = cmd.index("--client-oauth-config")
+    assert cmd[option_idx + 1] == "C:/config/oauth.json"
+    assert option_idx < cmd.index("keep-alive")
+
+
 def test_spawn_keep_alive_omits_optional_flags_when_none(mocker):
     """Backwards compat: callers that don't pass optional global flags get a
     command line without them (the daemon uses Typer defaults)."""
@@ -177,6 +195,7 @@ def test_spawn_keep_alive_omits_optional_flags_when_none(mocker):
     cmd = mock_popen.call_args.args[0]
     assert not any(c.startswith("--auth") for c in cmd)
     assert "--config" not in cmd
+    assert "--client-oauth-config" not in cmd
 
 
 @patch("colab_cli.commands.session.spawn_keep_alive")

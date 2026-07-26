@@ -319,6 +319,7 @@ def run_command(
             name,
             auth_provider=state.auth_provider,
             config_path=state.config_path,
+            client_oauth_config=state.client_oauth_config,
         )
         state.store.add(s)
         state.history.log_event(

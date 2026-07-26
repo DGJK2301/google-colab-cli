@@ -120,14 +120,27 @@ class StateStore(_LockedFileStore):
             path = os.path.expanduser("~/.config/colab-cli/sessions.json")
         super().__init__(path)
 
+    def _load_raw_strict(self, f) -> Dict[str, SessionState]:
+        f.seek(0)
+        content = f.read()
+        if not content or content.isspace():
+            return {}
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            raise ValueError("session store root must be a JSON object")
+        sessions: Dict[str, SessionState] = {}
+        for key, value in data.items():
+            session = SessionState.model_validate(value)
+            if session.name != key:
+                raise ValueError(
+                    f"session key {key!r} does not match embedded name {session.name!r}"
+                )
+            sessions[key] = session
+        return sessions
+
     def _load_raw(self, f) -> Dict[str, SessionState]:
         try:
-            f.seek(0)
-            content = f.read()
-            if not content or content.isspace():
-                return {}
-            data = json.loads(content)
-            return {k: SessionState(**v) for k, v in data.items()}
+            return self._load_raw_strict(f)
         except Exception:
             return {}
 
@@ -140,6 +153,56 @@ class StateStore(_LockedFileStore):
             sessions = self._load_raw(f)
             sessions[state.name] = state
             self._save_raw(f, sessions)
+
+    def add_strict(self, state: SessionState):
+        """Add state without replacing an unreadable store."""
+        with self._lock_exclusive() as f:
+            sessions = self._load_raw_strict(f)
+            sessions[state.name] = state
+            self._save_raw(f, sessions)
+
+    def claim_strict(self, state: SessionState):
+        """Atomically claim one local name and remote endpoint."""
+        with self._lock_exclusive() as f:
+            sessions = self._load_raw_strict(f)
+            if state.name in sessions:
+                raise RuntimeError(
+                    "SESSION_NAME_CONFLICT: local session name already exists"
+                )
+            endpoint_owner = next(
+                (item for item in sessions.values() if item.endpoint == state.endpoint),
+                None,
+            )
+            if endpoint_owner is not None:
+                raise RuntimeError(
+                    "ENDPOINT_ALREADY_ATTACHED: endpoint is "
+                    f"already tracked as {endpoint_owner.name!r}"
+                )
+            sessions[state.name] = state
+            self._save_raw(f, sessions)
+
+    def update_claim_strict(self, state: SessionState):
+        """Update a claim only while it still owns the same endpoint."""
+        with self._lock_exclusive() as f:
+            sessions = self._load_raw_strict(f)
+            current = sessions.get(state.name)
+            if current is None or current.endpoint != state.endpoint:
+                raise RuntimeError(
+                    "SESSION_CLAIM_LOST: local session claim changed during setup"
+                )
+            sessions[state.name] = state
+            self._save_raw(f, sessions)
+
+    def remove_claim_strict(self, name: str, endpoint: str) -> bool:
+        """Remove only the claim that still owns ``endpoint``."""
+        with self._lock_exclusive() as f:
+            sessions = self._load_raw_strict(f)
+            current = sessions.get(name)
+            if current is None or current.endpoint != endpoint:
+                return False
+            del sessions[name]
+            self._save_raw(f, sessions)
+            return True
 
     def get(self, name: str) -> Optional[SessionState]:
         with self._lock_shared() as f:
@@ -155,8 +218,23 @@ class StateStore(_LockedFileStore):
                 del sessions[name]
                 self._save_raw(f, sessions)
 
+    def remove_strict(self, name: str):
+        """Remove state without replacing an unreadable store."""
+        with self._lock_exclusive() as f:
+            sessions = self._load_raw_strict(f)
+            if name in sessions:
+                del sessions[name]
+                self._save_raw(f, sessions)
+
     def list(self) -> Dict[str, SessionState]:
         with self._lock_shared() as f:
             if f is None:
                 return {}
             return self._load_raw(f)
+
+    def list_strict(self) -> Dict[str, SessionState]:
+        """Read state and surface corruption instead of returning empty."""
+        with self._lock_shared() as f:
+            if f is None:
+                return {}
+            return self._load_raw_strict(f)

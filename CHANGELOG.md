@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The package version is derived from the git tag via `hatch-vcs`; each release
 below corresponds to a tag of the same name.
 
+## [0.7.0rc3] - 2026-07-26
+
+### Added
+
+- Add `colab doctor` and the stable `colab.doctor.v1` contract. The default
+  path is local-only and audits installation identity, dependency versions,
+  OAuth cache metadata/ACL, strict session/settings parsing, keep-alive PIDs,
+  and transfer leases. `--network` performs one bounded assignment query and
+  never allocates a runtime.
+- Add foreground `colab monitor JOB` with resumable local evidence:
+  `stdout.log`, `stderr.log`, `job.jsonl`, `resources.jsonl`, `events.jsonl`,
+  `monitor_state.json`, and `summary.json`.
+- Add `colab attach --endpoint ENDPOINT -s NAME` and `colab.attach.v1` for
+  transactionally adopting an assignment that exists on the current account
+  but has no usable local state.
+
+### Changed
+
+- Monitor state binds the session endpoint, persisted remote runtime identity,
+  and probed boot ID. Re-running the command resumes byte offsets without
+  duplicating logs; terminal jobs do not return until their remaining logs have
+  been copied locally.
+- Resource probe failure records an unavailable sample without terminating the
+  remote training process. Local Ctrl+C stops only the monitor and exits 130.
+- Attach validates the exact live endpoint, rejects local conflicts, establishes
+  a bounded control kernel by default, starts keep-alive, and rolls back local
+  state on failure without releasing the remote assignment.
+- Add strict session-store reads/writes for recovery operations so corrupted
+  local state is surfaced instead of being silently replaced with an empty
+  store.
+
 ## [0.7.0rc2] - 2026-07-25
 
 ### Added
@@ -152,3 +183,5 @@ below corresponds to a tag of the same name.
 [0.7.0rc1]: https://github.com/DGJK2301/google-colab-cli/compare/v0.6.0.post1...v0.7.0rc1
 
 [0.7.0rc2]: https://github.com/DGJK2301/google-colab-cli/compare/v0.7.0rc1...v0.7.0rc2
+
+[0.7.0rc3]: https://github.com/DGJK2301/google-colab-cli/compare/v0.7.0rc2...v0.7.0rc3

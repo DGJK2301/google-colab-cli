@@ -88,6 +88,35 @@ colab download -s <name> --json REMOTE LOCAL
 - Do not use this path for the 20 GB dataset population. Keep bulk data in
   Drive/GCS and localize it inside the VM.
 
+## Operational recovery
+
+Use these surfaces before and during long training:
+
+```bash
+colab doctor --json
+colab sessions --json
+colab attach --endpoint <exact-endpoint> -s <name> --json
+colab monitor <job-id> -s <name>   --interval 5 --probe-every 60   --output runs/<job-id> --json
+```
+
+- `doctor` is local-only unless `--network` is explicit. Treat insecure token
+  ACL, invalid state, dead keep-alive PID, and unsafe transfer lease as
+  actionable diagnostics; never ask it to print credential values.
+- `sessions --json` is the full assignment inventory. A record with
+  `lifecycle=orphan_server` can be adopted by exact endpoint.
+- `attach` defaults to establishing a control kernel and keep-alive. It never
+  allocates a new runtime and never releases the remote assignment after local
+  failure.
+- `monitor` is foreground, but the training job remains detached. Ctrl+C stops
+  only local monitoring. Restart the same command with the same output
+  directory to continue from saved byte offsets.
+- Preserve the whole evidence directory. `stdout.log`/`stderr.log` are raw
+  streams; `job.jsonl` and `resources.jsonl` are append-only observations;
+  `summary.json` is the final machine-readable result.
+- A reclaimed Colab VM cannot resume its process. Local evidence already copied
+  by monitor survives; uncopied `/content` bytes do not. Long training still
+  requires checkpoint persistence to Drive or another durable store.
+
 ## Workflow
 
 ### Provision
