@@ -196,7 +196,7 @@ print('REMOTE_TRANSFER_SHA_OK')
 "@
         $verifyOutput = (
             $verifyCode |
-                Invoke-Colab exec --session $sessionName `
+                & $ColabCommand exec --session $sessionName `
                     --fail-on-error 2>&1 |
                 Out-String
         )

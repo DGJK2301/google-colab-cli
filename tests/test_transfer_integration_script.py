@@ -19,6 +19,13 @@ def test_transfer_live_script_uses_installed_cli_and_json():
     assert "Assert-TransferResult" in text
 
 
+def test_transfer_live_script_pipes_code_to_native_cli_command():
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert "$verifyCode |\n                & $ColabCommand exec" in text
+    assert "$verifyCode |\n                Invoke-Colab exec" not in text
+
+
 def test_transfer_live_script_has_required_benchmark_matrix():
     text = SCRIPT.read_text(encoding="utf-8")
 
