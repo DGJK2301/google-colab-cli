@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The package version is derived from the git tag via `hatch-vcs`; each release
 below corresponds to a tag of the same name.
 
+## [0.7.0rc2] - 2026-07-25
+
+### Added
+
+- Add a cross-process `TransferLease` around the entire verified
+  inspect/resume/chunk/hash/atomic-finalize lifecycle. Upload identity binds the
+  runtime endpoint and normalized remote target, independent of the
+  control-plane auth used to reach that runtime. Download identity binds the
+  platform-normalized local destination without rewriting resume paths.
+- Add process-identity-backed lease metadata with PID, process start token,
+  heartbeat, source size/SHA-256, progress, resume offset, retry count, target,
+  and partial path. Active metadata is recycled only after the original process
+  is proven gone or its PID has been reused.
+- Add stable `colab.transfer.v1` JSON for upload and download, including byte
+  counts, resume offset, elapsed time, throughput, ETA, retry count, final
+  SHA-256, lease evidence, warnings, errors, and exact resume argv.
+- Add deterministic Ctrl+C behavior: preserve verified partial state, record an
+  `interrupted` history event, print/return a resume command, and exit 130.
+
+### Changed
+
+- Reuse one `requests.Session` per `ContentsClient` while preserving explicit
+  per-request connect/read timeout tuples and deterministic close semantics.
+- Send transfer progress and diagnostics to stderr while reserving JSON stdout
+  for one final document.
+- Close the Contents HTTP pool before the remote executor; cleanup failures are
+  warnings and never replace the primary transfer result or exception.
+
 ## [0.7.0rc1] - 2026-07-22
 
 ### Added
@@ -122,3 +150,5 @@ below corresponds to a tag of the same name.
 [0.6.0.post1]: https://github.com/DGJK2301/google-colab-cli/compare/514db7e032a3e93bba9586cab8fcf00d37d1dd96...v0.6.0.post1
 
 [0.7.0rc1]: https://github.com/DGJK2301/google-colab-cli/compare/v0.6.0.post1...v0.7.0rc1
+
+[0.7.0rc2]: https://github.com/DGJK2301/google-colab-cli/compare/v0.7.0rc1...v0.7.0rc2

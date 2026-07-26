@@ -32,6 +32,7 @@ def _session():
     session.name = "s1"
     session.url = "https://runtime"
     session.token = "token"
+    session.endpoint = "runtime-endpoint"
     session.kernel_id = None
     session.session_id = None
     return session
@@ -185,3 +186,454 @@ def test_open_transfer_defensively_rejects_invalid_chunk_size_before_executor(
 
 def test_one_byte_chunk_size_is_valid():
     assert _chunk_size_mib_to_bytes(1 / (1024 * 1024)) == 1
+
+
+@pytest.fixture(autouse=True)
+def isolated_transfer_leases(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv(
+        "COLAB_CLI_TRANSFER_LEASE_DIR",
+        str(tmp_path / "transfer-leases"),
+    )
+
+
+def _real_session(*, token="runtime-secret"):
+    from colab_cli.state import SessionState
+
+    return SessionState(
+        name="s1",
+        token=token,
+        url="https://runtime.example.test",
+        endpoint="runtime-endpoint",
+        kernel_id="kernel-id",
+        session_id="jupyter-session-id",
+    )
+
+
+def _json_payload(result):
+    import json
+
+    assert result.stdout.strip().startswith("{"), result.output
+    return json.loads(result.stdout)
+
+
+def _prepare_json_session(
+    mock_common_state,
+    session=None,
+):
+    selected = session or _real_session()
+    mock_common_state.store.list.return_value = {selected.name: selected}
+    mock_common_state.auth_provider = "oauth2"
+    mock_common_state.client_oauth_config = None
+    mock_common_state.config_path = None
+    return selected
+
+
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_upload_json_emits_one_stable_document(
+    mock_open_executor,
+    mock_transfer_class,
+    mock_common_state,
+    mocker,
+    tmp_path,
+):
+    source = tmp_path / "repo.bundle"
+    source.write_bytes(b"bundle")
+    selected = _prepare_json_session(mock_common_state)
+    mock_transfer_class.return_value.upload.return_value = TransferResult(
+        "content/repo.bundle",
+        6,
+        "abc",
+        2,
+        1,
+    )
+    update = mocker.patch("colab_cli.auto_update.run_background_check")
+
+    result = runner.invoke(
+        app,
+        [
+            "upload",
+            "-s",
+            selected.name,
+            "--json",
+            str(source),
+            "content/repo.bundle",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _json_payload(result)
+    assert payload["schema"] == "colab.transfer.v1"
+    assert payload["status"] == "completed"
+    assert payload["completed_bytes"] == 6
+    assert payload["total_bytes"] == 6
+    assert payload["resumed_from"] == 2
+    assert payload["retry_count"] == 1
+    assert payload["sha256"] == "abc"
+    assert payload["resume_command"] is None
+    assert payload["resume_argv"] == []
+    assert payload["lease"]["lease_id"]
+    assert selected.token not in result.stdout
+    mock_common_state.sync_sessions.assert_not_called()
+    mock_common_state.resolve_session.assert_not_called()
+    update.assert_not_called()
+    mock_open_executor.return_value.close.assert_called_once_with()
+
+
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_download_json_reports_transfer_metrics(
+    mock_open_executor,
+    mock_transfer_class,
+    mock_common_state,
+    tmp_path,
+):
+    target = tmp_path / "model.ckpt"
+    selected = _prepare_json_session(mock_common_state)
+    mock_transfer_class.return_value.download.return_value = TransferResult(
+        str(target),
+        4096,
+        "digest",
+        1024,
+        2,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "download",
+            "-s",
+            selected.name,
+            "--json",
+            "content/model.ckpt",
+            str(target),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _json_payload(result)
+    assert payload["direction"] == "download"
+    assert payload["completed_bytes"] == 4096
+    assert payload["resumed_from"] == 1024
+    assert payload["retry_count"] == 2
+    assert payload["sha256"] == "digest"
+    assert payload["mib_per_second"] is not None
+    assert payload["eta_seconds"] == 0.0
+    mock_open_executor.return_value.close.assert_called_once_with()
+
+
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_upload_interrupt_returns_130_and_exact_resume(
+    mock_open_executor,
+    mock_transfer_class,
+    mock_common_state,
+    tmp_path,
+):
+    from colab_cli.transfer import TransferProgress
+
+    source = tmp_path / "repo bundle.bin"
+    source.write_bytes(b"abcdefgh")
+    selected = _prepare_json_session(mock_common_state)
+
+    def interrupted(*_args, **_kwargs):
+        progress = mock_transfer_class.call_args.kwargs["progress"]
+        progress(
+            TransferProgress(
+                direction="upload",
+                completed=4,
+                total=8,
+                resumed_from=0,
+                retry_count=1,
+                sha256="partial-digest",
+                partial_path="content/repo.part",
+            )
+        )
+        raise KeyboardInterrupt
+
+    mock_transfer_class.return_value.upload.side_effect = interrupted
+
+    result = runner.invoke(
+        app,
+        [
+            "upload",
+            "-s",
+            selected.name,
+            "--json",
+            "--chunk-size-mib",
+            "0.25",
+            str(source),
+            "content/repo bundle.bin",
+        ],
+    )
+
+    assert result.exit_code == 130, result.output
+    payload = _json_payload(result)
+    assert payload["status"] == "interrupted"
+    assert payload["error"]["code"] == ("TRANSFER_INTERRUPTED")
+    assert payload["completed_bytes"] == 4
+    assert payload["total_bytes"] == 8
+    assert payload["partial_path"] == ("content/repo.part")
+    assert payload["resume_argv"][:3] == [
+        "colab",
+        "--auth",
+        "oauth2",
+    ]
+    assert "--resume" in payload["resume_argv"]
+    assert "--json" in payload["resume_argv"]
+    assert payload["resume_argv"][-2:] == [
+        str(source.resolve()),
+        "content/repo bundle.bin",
+    ]
+    assert payload["resume_command"]
+    history = mock_common_state.history.log_event.call_args.args[2]
+    assert history["state"] == "interrupted"
+    assert history["completed_bytes"] == 4
+    mock_open_executor.return_value.close.assert_called_once_with()
+
+
+@patch("colab_cli.commands.files.ContentsClient")
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_primary_error_survives_cleanup_and_is_redacted(
+    mock_open_executor,
+    mock_transfer_class,
+    mock_contents,
+    mock_common_state,
+    tmp_path,
+):
+    source = tmp_path / "repo.bundle"
+    source.write_bytes(b"bundle")
+    selected = _prepare_json_session(mock_common_state)
+    mock_transfer_class.return_value.upload.side_effect = RuntimeError(
+        f"request failed token={selected.token}"
+    )
+    mock_contents.return_value.close.side_effect = OSError("contents cleanup failed")
+    mock_open_executor.return_value.close.side_effect = OSError(
+        "executor cleanup failed"
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "upload",
+            "-s",
+            selected.name,
+            "--json",
+            str(source),
+            "content/repo.bundle",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = _json_payload(result)
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == ("TRANSFER_FAILED")
+    assert selected.token not in payload["error"]["message"]
+    assert "request failed" in payload["error"]["message"]
+    assert any("contents cleanup failed" in item for item in payload["warnings"])
+    assert any("executor cleanup failed" in item for item in payload["warnings"])
+    history = mock_common_state.history.log_event.call_args.args[2]
+    assert history["state"] == "failed"
+    assert selected.token not in history["error"]
+    assert "<redacted>" in history["error"]
+
+
+@patch("colab_cli.commands.files.ContentsClient")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_held_upload_lease_fails_before_remote_work(
+    mock_open_executor,
+    mock_contents,
+    mock_common_state,
+    tmp_path,
+):
+    from colab_cli.transfer_lease import (
+        TransferLease,
+    )
+
+    source = tmp_path / "repo.bundle"
+    source.write_bytes(b"bundle")
+    selected = _prepare_json_session(mock_common_state)
+    held = TransferLease.for_upload(
+        endpoint=selected.endpoint,
+        local_path=source,
+        remote_path="content/repo.bundle",
+    )
+    held.acquire()
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "upload",
+                "-s",
+                selected.name,
+                "--json",
+                str(source),
+                "content/repo.bundle",
+            ],
+        )
+    finally:
+        held.release()
+
+    assert result.exit_code == 1
+    payload = _json_payload(result)
+    assert payload["status"] == "busy"
+    assert payload["error"]["code"] == ("TRANSFER_TARGET_BUSY")
+    assert payload["error"]["retryable"] is True
+    mock_open_executor.assert_not_called()
+    mock_contents.assert_not_called()
+
+
+def test_missing_upload_source_json_precedes_session_access(
+    mock_common_state,
+    tmp_path,
+):
+    missing = tmp_path / "missing.bin"
+
+    result = runner.invoke(
+        app,
+        [
+            "upload",
+            "-s",
+            "s1",
+            "--json",
+            str(missing),
+            "content/missing.bin",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = _json_payload(result)
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == ("TRANSFER_FILE_NOT_FOUND")
+    mock_common_state.store.list.assert_not_called()
+    mock_common_state.resolve_session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command,args",
+    [
+        (
+            "upload",
+            [
+                "source.bin",
+                "",
+            ],
+        ),
+        (
+            "download",
+            [
+                "",
+                "target.bin",
+            ],
+        ),
+    ],
+)
+def test_invalid_remote_path_json_is_structured(
+    command,
+    args,
+    mock_common_state,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    if command == "upload":
+        (tmp_path / "source.bin").write_bytes(b"x")
+
+    result = runner.invoke(
+        app,
+        [
+            command,
+            "--json",
+            *args,
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = _json_payload(result)
+    assert payload["error"]["code"] == ("TRANSFER_INVALID_PATH")
+    mock_common_state.store.list.assert_not_called()
+
+
+@patch("colab_cli.commands.files.TransferLease.for_upload")
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_lease_cleanup_failure_does_not_replace_primary_error(
+    mock_open_executor,
+    mock_transfer_class,
+    mock_lease_factory,
+    mock_common_state,
+    tmp_path,
+):
+    source = tmp_path / "repo.bundle"
+    source.write_bytes(b"bundle")
+    selected = _prepare_json_session(mock_common_state)
+    lease = MagicMock()
+    lease.lease_id = "lease-id"
+    lease.lock_key = "lock-key"
+    lease.stale_reclaimed = False
+    lease.stale_reclaimed_from = None
+    lease.cleanup_errors = []
+    lease.release.side_effect = RuntimeError("lease cleanup failed")
+    mock_lease_factory.return_value = lease
+    mock_transfer_class.return_value.upload.side_effect = RuntimeError(
+        "primary transfer failure"
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "upload",
+            "-s",
+            selected.name,
+            "--json",
+            str(source),
+            "content/repo.bundle",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = _json_payload(result)
+    assert "primary transfer failure" in (payload["error"]["message"])
+    assert any("lease cleanup failed" in warning for warning in payload["warnings"])
+    mock_open_executor.return_value.close.assert_called_once_with()
+
+
+@patch("colab_cli.commands.files.FileTransfer")
+@patch("colab_cli.commands.files.open_remote_executor")
+def test_existing_target_has_stable_error_code(
+    mock_open_executor,
+    mock_transfer_class,
+    mock_common_state,
+    tmp_path,
+):
+    source = tmp_path / "repo.bundle"
+    source.write_bytes(b"bundle")
+    selected = _prepare_json_session(mock_common_state)
+    from colab_cli.remote import RemoteExecutionError
+
+    mock_transfer_class.return_value.upload.side_effect = RemoteExecutionError(
+        "FileExistsError",
+        "content/repo.bundle",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "upload",
+            "-s",
+            selected.name,
+            "--json",
+            "--no-overwrite",
+            str(source),
+            "content/repo.bundle",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = _json_payload(result)
+    assert payload["error"]["code"] == ("TRANSFER_TARGET_EXISTS")
+    assert payload["error"]["retryable"] is False

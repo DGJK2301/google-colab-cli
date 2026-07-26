@@ -64,6 +64,30 @@ colab jobs -s <name> --json
 - A `partial` result can still contain valid resource data from another source;
   inspect `warnings`, `errors`, and `probe.issues` before deciding to retry.
 
+## Verified transfer lifecycle
+
+For source bundles, checkpoints, and diagnostics:
+
+```bash
+colab upload -s <name> --json LOCAL REMOTE
+colab download -s <name> --json REMOTE LOCAL
+```
+
+- A destination has one local writer. `TRANSFER_TARGET_BUSY` means another
+  transfer owns that target; do not bypass or delete its lease.
+- `colab.transfer.v1` is the automation contract. Parse stdout as one JSON
+  document; progress is on stderr.
+- On Ctrl+C, exit code `130` plus `TRANSFER_INTERRUPTED` is expected. Use
+  `resume_argv` exactly rather than reconstructing flags from memory.
+- A verified `.part` is preserved for resume. Do not rename, concatenate, or
+  manually edit it.
+- Unknown/corrupt owner identity fails closed. Only the CLI may recycle stale
+  metadata after PID/start-token verification.
+- The default chunk is still 0.25 MiB. Do not increase it based on intuition;
+  use the live 0.25/0.5/1/2 MiB benchmark.
+- Do not use this path for the 20 GB dataset population. Keep bulk data in
+  Drive/GCS and localize it inside the VM.
+
 ## Workflow
 
 ### Provision

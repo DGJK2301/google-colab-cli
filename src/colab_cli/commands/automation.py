@@ -253,9 +253,9 @@ def install(
         if not os.path.isfile(requirement):
             typer.echo(f"[colab] Requirements file '{requirement}' not found locally.")
             raise typer.Exit(1)
-        contents = ContentsClient(state.store.get(name))
         remote_path = f"content/{os.path.basename(requirement)}"
-        contents.upload(requirement, remote_path)
+        with ContentsClient(state.store.get(name)) as contents:
+            contents.upload(requirement, remote_path)
         commands.extend(["-r", f"/{remote_path}"])
     if packages:
         commands.extend(packages)

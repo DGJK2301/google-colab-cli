@@ -80,6 +80,42 @@ def test_cli_install(mock_state, mock_runtime_class, mock_session):
     assert "numpy" in called_code
 
 
+@patch("colab_cli.commands.automation.ContentsClient")
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
+def test_cli_install_closes_requirement_upload_client(
+    mock_state,
+    mock_runtime_class,
+    mock_contents_class,
+    mock_session,
+    tmp_path,
+):
+    requirement = tmp_path / "requirements.txt"
+    requirement.write_text("numpy\n", encoding="utf-8")
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+    mock_runtime_class.return_value.execute_code.return_value = [{"text": "Installed"}]
+
+    result = runner.invoke(
+        app,
+        [
+            "install",
+            "-s",
+            "test-session",
+            "-r",
+            str(requirement),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    client = mock_contents_class.return_value.__enter__.return_value
+    client.upload.assert_called_once_with(
+        str(requirement),
+        "content/requirements.txt",
+    )
+    mock_contents_class.return_value.__exit__.assert_called_once()
+
+
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
 def test_cli_drivemount(mock_state, mock_runtime_class, mock_session):

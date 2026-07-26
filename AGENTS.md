@@ -70,6 +70,36 @@
 - **Secret exclusion:** JSON must never contain OAuth credentials, runtime proxy
   tokens, authorization headers, or environment secret values.
 
+## Transfer Lifecycle v1 Contracts
+
+- **One destination, one writer:** acquire `TransferLease` before inspecting a
+  partial or opening the remote executor. The lock spans resume validation,
+  every chunk, SHA/size verification, and atomic completion.
+- **Stable identity:** upload locks bind the assignment endpoint and normalized
+  remote destination. Control-plane auth flags do not change the runtime file
+  being written and therefore must not split the lock. Download locks bind a
+  platform-normalized local destination while preserving the original path
+  spelling in resume evidence.
+- **Fail-fast contention:** filelock acquisition is non-blocking. Never wait
+  silently behind another transfer and never perform remote work before the
+  lease is owned.
+- **Verified stale recovery:** metadata must include PID and a process start
+  token. Reclaim only when that exact process is gone or the PID has been
+  reused; unverifiable identity fails closed.
+- **HTTP lifecycle:** one `ContentsClient` owns one reusable
+  `requests.Session`. Every request still passes an explicit `(connect, read)`
+  timeout tuple, every response is closed, and the owned Session is closed
+  before the remote executor.
+- **Interrupt contract:** Ctrl+C preserves verified partial bytes, records
+  `state=interrupted`, returns 130, and emits exact `resume_argv`. Cleanup
+  failures remain warnings and never replace the primary result.
+- **Machine output:** `upload/download --json` emit one
+  `colab.transfer.v1` document on stdout. Progress and diagnostics belong on
+  stderr; credentials and runtime tokens must be redacted.
+- **Scope boundary:** transfer remains for bundles, checkpoints, and
+  diagnostics. Do not turn it into a 20 GB dataset synchronization system or a
+  remote transfer daemon.
+
 ## Core Mandates
 - **Minimalism**: Favor standard library where possible (e.g., `urllib`) while utilizing `Typer` for CLI ergonomics.
 - **Piping**: Always consider piped input (`stdin`) vs. interactive TTY.

@@ -14,6 +14,8 @@
 
 import hashlib
 
+import pytest
+
 from requests import ReadTimeout
 
 from colab_cli.transfer import FileTransfer
@@ -24,6 +26,7 @@ class FakeRemoteFiles:
         self.files = {}
         self.finalized = []
         self.stat_calls = []
+        self.retry_count = 0
 
     def stat_file(self, path, *, hash_limit=None):
         self.stat_calls.append((path, hash_limit))
@@ -99,6 +102,30 @@ def test_upload_streams_chunks_and_atomically_finalizes(tmp_path):
     assert any(limit == 0 for _path, limit in remote.stat_calls)
 
 
+def test_upload_empty_file_creates_and_finalizes_remote_target(tmp_path):
+    source = tmp_path / "empty.bundle"
+    source.write_bytes(b"")
+    remote = FakeRemoteFiles()
+    contents = FakeContents(remote)
+    transfer = FileTransfer(contents, remote, chunk_size=4)
+
+    result = transfer.upload(source, "content/empty.bundle")
+
+    assert contents.calls == [
+        (
+            transfer.remote_temp_path(
+                "content/empty.bundle",
+                hashlib.sha256(b"").hexdigest(),
+            ),
+            b"",
+            -1,
+        )
+    ]
+    assert remote.files["content/empty.bundle"] == b""
+    assert result.size == 0
+    assert result.sha256 == hashlib.sha256(b"").hexdigest()
+
+
 def test_upload_resumes_a_verified_remote_prefix(tmp_path):
     source = tmp_path / "archive.bundle"
     source.write_bytes(b"abcdefghij")
@@ -144,3 +171,237 @@ def test_download_resumes_verified_part_and_replaces_target(tmp_path):
     assert not part.exists()
     assert result.size == 10
     assert result.sha256 == hashlib.sha256(b"abcdefghij").hexdigest()
+
+
+def test_download_empty_file_atomically_replaces_target(tmp_path):
+    remote = FakeRemoteFiles()
+    remote.files["content/empty.ckpt"] = b""
+    contents = FakeContents(remote)
+    transfer = FileTransfer(contents, remote, chunk_size=4)
+    target = tmp_path / "empty.ckpt"
+    target.write_bytes(b"stale")
+
+    result = transfer.download("content/empty.ckpt", target)
+
+    assert target.read_bytes() == b""
+    assert result.size == 0
+    assert result.sha256 == hashlib.sha256(b"").hexdigest()
+
+
+def test_actual_upload_retries_are_counted(tmp_path):
+    source = tmp_path / "archive.bundle"
+    source.write_bytes(b"abcdefgh")
+    remote = FakeRemoteFiles()
+
+    class FailBeforeWrite(FakeContents):
+        def __init__(self, remote):
+            super().__init__(remote)
+            self.fail_once = True
+
+        def upload_chunk(self, path, data, *, chunk):
+            if self.fail_once and data:
+                self.fail_once = False
+                raise ReadTimeout("request failed before write")
+            return super().upload_chunk(
+                path,
+                data,
+                chunk=chunk,
+            )
+
+    transfer = FileTransfer(
+        FailBeforeWrite(remote),
+        remote,
+        chunk_size=4,
+    )
+
+    result = transfer.upload(
+        source,
+        "content/archive.bundle",
+    )
+
+    assert result.retry_count == 1
+    assert remote.files["content/archive.bundle"] == (b"abcdefgh")
+
+
+def test_lost_response_reconciliation_is_not_counted_as_replay(
+    tmp_path,
+):
+    source = tmp_path / "archive.bundle"
+    source.write_bytes(b"abcdefgh")
+    remote = FakeRemoteFiles()
+    transfer = FileTransfer(
+        FakeContents(
+            remote,
+            fail_after_write_at=4,
+        ),
+        remote,
+        chunk_size=4,
+    )
+
+    result = transfer.upload(
+        source,
+        "content/archive.bundle",
+    )
+
+    assert result.retry_count == 0
+
+
+def test_interrupted_upload_preserves_verified_partial_for_resume(
+    tmp_path,
+):
+    source = tmp_path / "archive.bundle"
+    source.write_bytes(b"abcdefghij")
+    remote = FakeRemoteFiles()
+
+    def interrupt(progress):
+        if progress.phase == "transferring" and progress.completed >= 4:
+            raise KeyboardInterrupt
+
+    first = FileTransfer(
+        FakeContents(remote),
+        remote,
+        chunk_size=4,
+        progress=interrupt,
+    )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    temp_path = first.remote_temp_path(
+        "content/archive.bundle",
+        digest,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        first.upload(
+            source,
+            "content/archive.bundle",
+        )
+
+    assert remote.files[temp_path] == b"abcd"
+
+    second = FileTransfer(
+        FakeContents(remote),
+        remote,
+        chunk_size=4,
+    )
+    result = second.upload(
+        source,
+        "content/archive.bundle",
+    )
+
+    assert result.resumed_from == 4
+    assert remote.files["content/archive.bundle"] == (source.read_bytes())
+    assert result.sha256 == digest
+
+
+def test_interrupted_download_preserves_verified_partial_for_resume(
+    tmp_path,
+):
+    remote = FakeRemoteFiles()
+    remote.files["content/model.ckpt"] = b"abcdefghij"
+    target = tmp_path / "model.ckpt"
+
+    def interrupt(progress):
+        if progress.phase == "transferring" and progress.completed >= 4:
+            raise KeyboardInterrupt
+
+    first = FileTransfer(
+        FakeContents(remote),
+        remote,
+        chunk_size=4,
+        progress=interrupt,
+    )
+    part = first.local_temp_path(target)
+
+    with pytest.raises(KeyboardInterrupt):
+        first.download(
+            "content/model.ckpt",
+            target,
+        )
+
+    assert part.read_bytes() == b"abcd"
+
+    second = FileTransfer(
+        FakeContents(remote),
+        remote,
+        chunk_size=4,
+    )
+    result = second.download(
+        "content/model.ckpt",
+        target,
+    )
+
+    assert result.resumed_from == 4
+    assert target.read_bytes() == b"abcdefghij"
+    assert not part.exists()
+    assert result.sha256 == hashlib.sha256(b"abcdefghij").hexdigest()
+
+
+def test_upload_result_includes_remote_control_reconnects(
+    tmp_path,
+):
+    source = tmp_path / "archive.bundle"
+    source.write_bytes(b"abcdefgh")
+    remote = FakeRemoteFiles()
+
+    class RemoteWithReconnect(FakeRemoteFiles):
+        def __init__(self):
+            super().__init__()
+            self.bumped = False
+
+        def stat_file(self, path, *, hash_limit=None):
+            if not self.bumped:
+                self.retry_count += 1
+                self.bumped = True
+            return super().stat_file(
+                path,
+                hash_limit=hash_limit,
+            )
+
+    remote = RemoteWithReconnect()
+    transfer = FileTransfer(
+        FakeContents(remote),
+        remote,
+        chunk_size=4,
+    )
+
+    result = transfer.upload(
+        source,
+        "content/archive.bundle",
+    )
+
+    assert result.retry_count == 1
+
+
+def test_download_result_includes_remote_control_reconnects(
+    tmp_path,
+):
+    class RemoteWithReconnect(FakeRemoteFiles):
+        def __init__(self):
+            super().__init__()
+            self.bumped = False
+
+        def read_chunk(self, path, *, offset, length):
+            if not self.bumped:
+                self.retry_count += 1
+                self.bumped = True
+            return super().read_chunk(
+                path,
+                offset=offset,
+                length=length,
+            )
+
+    remote = RemoteWithReconnect()
+    remote.files["content/model.ckpt"] = b"abcdefgh"
+    target = tmp_path / "model.ckpt"
+    transfer = FileTransfer(
+        FakeContents(remote),
+        remote,
+        chunk_size=4,
+    )
+
+    result = transfer.download(
+        "content/model.ckpt",
+        target,
+    )
+
+    assert result.retry_count == 1
+    assert target.read_bytes() == b"abcdefgh"

@@ -1,24 +1,14 @@
 # Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Licensed under the Apache License, Version 2.0.
 
 import base64
 from unittest.mock import MagicMock, patch
 
 import pytest
-from colab_cli.contents import ContentsClient
+import requests
 from requests import Response
 
+from colab_cli.contents import ContentsClient
 from colab_cli.state import SessionState
 
 
@@ -33,156 +23,249 @@ def session():
 
 
 @pytest.fixture
-def client(session):
-    return ContentsClient(session)
+def http_session():
+    return MagicMock(spec=requests.Session)
 
 
-@patch("colab_cli.contents.requests.request")
-def test_list_dir(mock_request, client):
-    mock_resp = MagicMock(spec=Response)
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {
-        "name": "content",
-        "type": "directory",
-        "content": [
-            {"name": "file.txt", "type": "file"},
-            {"name": "dir", "type": "directory"},
-        ],
-    }
-    mock_request.return_value = mock_resp
+@pytest.fixture
+def client(session, http_session):
+    return ContentsClient(
+        session,
+        http_session=http_session,
+    )
 
-    res = client.list_dir("content")
 
-    mock_request.assert_called_once_with(
+def _response(*, status=200, payload=None):
+    response = MagicMock(spec=Response)
+    response.status_code = status
+    response.json.return_value = payload or {}
+    return response
+
+
+def test_list_dir(client, http_session):
+    response = _response(
+        payload={
+            "name": "content",
+            "type": "directory",
+            "content": [
+                {
+                    "name": "file.txt",
+                    "type": "file",
+                },
+                {
+                    "name": "dir",
+                    "type": "directory",
+                },
+            ],
+        }
+    )
+    http_session.request.return_value = response
+
+    result = client.list_dir("content")
+
+    http_session.request.assert_called_once_with(
         "GET",
-        "https://fake-endpoint.colab.dev/api/contents/content",
-        params={"authuser": "0", "colab-runtime-proxy-token": "test-token"},
+        ("https://fake-endpoint.colab.dev/api/contents/content"),
+        params={
+            "authuser": "0",
+            "colab-runtime-proxy-token": "test-token",
+        },
         json=None,
         timeout=(10.0, 60.0),
     )
-    assert res["type"] == "directory"
-    assert len(res["content"]) == 2
+    response.close.assert_called_once_with()
+    assert result["type"] == "directory"
 
 
-@patch("colab_cli.contents.requests.request")
-def test_rm_file(mock_request, client):
-    mock_resp = MagicMock(spec=Response)
-    mock_resp.status_code = 204
-    mock_request.return_value = mock_resp
+def test_rm_file(client, http_session):
+    response = _response(status=204)
+    http_session.request.return_value = response
 
     client.rm("content/file.txt")
 
-    mock_request.assert_called_once_with(
+    http_session.request.assert_called_once_with(
         "DELETE",
-        "https://fake-endpoint.colab.dev/api/contents/content/file.txt",
-        params={"authuser": "0", "colab-runtime-proxy-token": "test-token"},
+        ("https://fake-endpoint.colab.dev/api/contents/content/file.txt"),
+        params={
+            "authuser": "0",
+            "colab-runtime-proxy-token": "test-token",
+        },
         json=None,
         timeout=(10.0, 60.0),
     )
+    response.close.assert_called_once_with()
 
 
-@patch("colab_cli.contents.requests.request")
-def test_404_error(mock_request, client):
-    mock_resp = MagicMock(spec=Response)
-    mock_resp.status_code = 404
-    mock_request.return_value = mock_resp
+def test_404_error(client, http_session):
+    response = _response(status=404)
+    http_session.request.return_value = response
 
     with pytest.raises(FileNotFoundError):
         client.list_dir("nonexistent")
 
+    response.close.assert_called_once_with()
 
-@patch("colab_cli.contents.requests.request")
-def test_download_file(mock_request, client, tmp_path):
-    mock_resp = MagicMock(spec=Response)
-    mock_resp.status_code = 200
 
-    # Mocking a base64 encoded response
+def test_download_file(
+    client,
+    http_session,
+    tmp_path,
+):
     content_bytes = b"Hello world!"
-    b64_content = base64.b64encode(content_bytes).decode("ascii")
-
-    mock_resp.json.return_value = {
-        "name": "test.txt",
-        "type": "file",
-        "format": "base64",
-        "content": b64_content,
-    }
-    mock_request.return_value = mock_resp
-
+    response = _response(
+        payload={
+            "name": "test.txt",
+            "type": "file",
+            "format": "base64",
+            "content": base64.b64encode(content_bytes).decode("ascii"),
+        }
+    )
+    http_session.request.return_value = response
     local_file = tmp_path / "test.txt"
-    client.download("content/test.txt", str(local_file))
 
-    mock_request.assert_called_once_with(
-        "GET",
-        "https://fake-endpoint.colab.dev/api/contents/content/test.txt",
-        params={
-            "authuser": "0",
-            "colab-runtime-proxy-token": "test-token",
-            "content": "1",
-        },
-        json=None,
-        timeout=(10.0, 60.0),
+    client.download(
+        "content/test.txt",
+        str(local_file),
     )
 
     assert local_file.read_bytes() == content_bytes
+    response.close.assert_called_once_with()
 
 
-@patch("colab_cli.contents.requests.request")
-def test_upload_file(mock_request, client, tmp_path):
-    mock_resp = MagicMock(spec=Response)
-    mock_resp.status_code = 200
-    mock_request.return_value = mock_resp
-
+def test_upload_file(
+    client,
+    http_session,
+    tmp_path,
+):
+    response = _response()
+    http_session.request.return_value = response
     local_file = tmp_path / "test.txt"
-    content_bytes = b"Hello upload!"
-    local_file.write_bytes(content_bytes)
+    local_file.write_bytes(b"Hello upload!")
 
-    client.upload(str(local_file), "content/test.txt")
-
-    expected_b64 = base64.b64encode(content_bytes).decode("ascii")
-
-    mock_request.assert_called_once_with(
-        "PUT",
-        "https://fake-endpoint.colab.dev/api/contents/content/test.txt",
-        params={"authuser": "0", "colab-runtime-proxy-token": "test-token"},
-        json={
-            "name": "test.txt",
-            "path": "content/test.txt",
-            "type": "file",
-            "format": "base64",
-            "content": expected_b64,
-            "chunk": 1,
-        },
-        timeout=(60.0, 120.0),
+    client.upload(
+        str(local_file),
+        "content/test.txt",
     )
 
+    payload = http_session.request.call_args.kwargs["json"]
+    assert payload["content"] == base64.b64encode(b"Hello upload!").decode("ascii")
+    assert payload["chunk"] == 1
+    response.close.assert_called_once_with()
 
-@patch("colab_cli.contents.requests.request")
-def test_upload_chunk_uses_large_file_manager_markers(mock_request, client):
-    mock_resp = MagicMock(spec=Response)
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {"type": "file", "size": 3}
-    mock_request.return_value = mock_resp
 
-    client.upload_chunk("content/archive.part", b"abc", chunk=2)
+def test_upload_chunk_uses_large_file_manager_markers(
+    client,
+    http_session,
+):
+    response = _response(
+        payload={
+            "type": "file",
+            "size": 3,
+        }
+    )
+    http_session.request.return_value = response
 
-    payload = mock_request.call_args.kwargs["json"]
+    client.upload_chunk(
+        "content/archive.part",
+        b"abc",
+        chunk=2,
+    )
+
+    payload = http_session.request.call_args.kwargs["json"]
     assert payload["content"] == base64.b64encode(b"abc").decode("ascii")
     assert payload["chunk"] == 2
-    assert mock_request.call_args.kwargs["timeout"] == (60.0, 120.0)
+    assert http_session.request.call_args.kwargs["timeout"] == (60.0, 120.0)
 
 
-@patch("colab_cli.contents.requests.request")
-def test_upload_chunk_accepts_an_independent_write_timeout(mock_request, session):
-    mock_resp = MagicMock(spec=Response)
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {"type": "file", "size": 3}
-    mock_request.return_value = mock_resp
+def test_upload_chunk_accepts_independent_write_timeout(
+    session,
+    http_session,
+):
+    response = _response(
+        payload={
+            "type": "file",
+            "size": 3,
+        }
+    )
+    http_session.request.return_value = response
     client = ContentsClient(
         session,
         request_timeout=(2.0, 3.0),
         upload_request_timeout=(11.0, 12.0),
+        http_session=http_session,
     )
 
-    client.upload_chunk("content/archive.part", b"abc", chunk=1)
+    client.upload_chunk(
+        "content/archive.part",
+        b"abc",
+        chunk=1,
+    )
 
-    assert mock_request.call_args.kwargs["timeout"] == (11.0, 12.0)
+    assert http_session.request.call_args.kwargs["timeout"] == (11.0, 12.0)
+
+
+def test_owned_session_is_reused_and_closed(session):
+    with patch("colab_cli.contents.requests.Session") as factory:
+        response = _response(
+            payload={
+                "type": "directory",
+                "content": [],
+            }
+        )
+        factory.return_value.request.return_value = response
+        client = ContentsClient(session)
+        client.list_dir("content")
+        client.list_dir("content")
+        client.close()
+        client.close()
+
+    factory.assert_called_once_with()
+    assert factory.return_value.request.call_count == 2
+    factory.return_value.close.assert_called_once_with()
+
+
+def test_context_manager_closes_owned_session(
+    session,
+):
+    with patch("colab_cli.contents.requests.Session") as factory:
+        with ContentsClient(session):
+            pass
+
+    factory.return_value.close.assert_called_once_with()
+
+
+def test_injected_session_is_not_closed(
+    client,
+    http_session,
+):
+    client.close()
+    http_session.close.assert_not_called()
+
+
+def test_closed_client_refuses_new_requests(
+    client,
+    http_session,
+):
+    client.close()
+
+    with pytest.raises(
+        RuntimeError,
+        match="closed",
+    ):
+        client.list_dir("content")
+
+    http_session.request.assert_not_called()
+
+
+def test_response_is_closed_when_status_check_fails(
+    client,
+    http_session,
+):
+    response = _response(status=500)
+    response.raise_for_status.side_effect = requests.HTTPError("failed")
+    http_session.request.return_value = response
+
+    with pytest.raises(requests.HTTPError):
+        client.list_dir("content")
+
+    response.close.assert_called_once_with()

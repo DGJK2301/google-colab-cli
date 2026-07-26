@@ -64,8 +64,13 @@ def test_remote_executor_raises_on_jupyter_error():
     )
     executor = RemoteExecutor(runtime)
 
-    with pytest.raises(RemoteExecutionError, match="RuntimeError: boom"):
+    with pytest.raises(
+        RemoteExecutionError,
+        match="RuntimeError: boom",
+    ) as caught:
         executor.execute_json("raise RuntimeError('boom')")
+    assert caught.value.remote_name == "RuntimeError"
+    assert caught.value.remote_value == "boom"
 
 
 def test_remote_executor_closes_runtime():
@@ -140,6 +145,7 @@ def test_remote_file_ops_reconnects_once_for_transport_failure():
 
     assert remote.stat_file("content/a.part") == {"exists": False}
     executor.reconnect.assert_called_once_with()
+    assert remote.retry_count == 1
 
 
 def test_remote_file_ops_does_not_retry_remote_code_error():

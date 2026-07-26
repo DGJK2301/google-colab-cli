@@ -17,7 +17,7 @@ End-to-end tests that run against a **live Colab backend** (unlike the mocked un
 | `repro_variable_persistence/` | Variables persist across `colab exec` calls in the same session. |
 | `repro_piped_console/` | Fast smoke test (~5s including session creation): `echo cmd \| colab console -s s` runs the command and exits within 30s. Regression test for the 2026-05-07 EOF-handler fix. |
 | `repro_bundled_oauth/` | Fast smoke test (~5s): verifies that the fallback OAuth configuration is loaded and starts the OAuth flow with the default client ID when local config is missing. |
-| `repro_resumable_transfer_jobs/` | Windows/free-CPU acceptance for an 8 MiB or real Git bundle round trip plus detached submit/list/tail/wait/cancel across separate CLI processes. |
+| `repro_resumable_transfer_jobs/` | Windows/free-CPU acceptance for 8/64 MiB verified JSON round trips, 0.25/0.5/1/2 MiB chunk benchmarks, process-leak checks, and detached submit/list/tail/wait/cancel. |
 
 
 ## Running
@@ -26,11 +26,26 @@ uv run bash integration/repro_keep_alive/test.sh
 ```
 `uv run` ensures the local `colab` entry point is on `PATH`.
 
-On Windows, validate the generic 8 MiB transfer and remote-job lifecycle:
+On Windows, install the candidate so `colab.exe` is directly on `PATH`,
+then validate the generic 8 MiB transfer and remote-job lifecycle:
 
 ```powershell
 pwsh -File integration/repro_resumable_transfer_jobs/test.ps1
 ```
+
+Run the 64 MiB chunk-size comparison and persist the benchmark receipt:
+
+```powershell
+pwsh -File integration/repro_resumable_transfer_jobs/test.ps1 `
+  -FileSizeMiB 64 `
+  -ChunkSizesMiB 0.25,0.5,1,2 `
+  -ResultPath .\artifacts\transfer-benchmark-64m.json
+```
+
+The script consumes `colab.transfer.v1`, checks final size/SHA, and verifies
+that no new `colab.exe` or `colab_cli` Python process remains after each
+transfer. Use `-SkipProcessLeakCheck` only when the local account cannot query
+`Win32_Process`.
 
 Pass a private local repository to exercise the exact Git bundle path without
 placing credentials in the runtime:

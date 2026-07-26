@@ -21,6 +21,7 @@ Designed to support seamless developer productivity, headless automation, and AI
 * **Ephemeral Job Runner (`colab run`):** Provision a fresh VM, execute a local script with forwarded arguments, retrieve output files, and automatically tear down the runtime in a single command.
 * **Reconnectable Remote Jobs:** Submit detached argv-based commands, persist stdout/stderr and status in the VM, then reattach with `jobs`, `tail`, `wait`, or `cancel` from a later CLI process.
 * **Verified Resumable Transfer:** Upload and download bounded chunks with prefix-safe resume, SHA-256 verification, request timeouts, and atomic destination replacement.
+* **Single-writer Transfer Lifecycle:** Cross-process leases protect each destination across inspection, resume, chunks, verification, and commit; Ctrl+C preserves a verified partial and returns an exact resume command.
 * **Automatic Keep-Alive:** Built-in background daemon automatically prevents idle VM termination, keeping resource allocations active without requiring open browser tabs.
 * **Seamless Workspace Automation:** Mount Google Drive, authenticate Google Cloud Platform (GCP) credentials, and install dependencies with high-performance `uv` package management.
 * **State & Log Archival:** Inspect local session states or export interactive history logs to standard Jupyter Notebooks, Markdown, or structured JSONL.
@@ -96,8 +97,8 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | Command | Description |
 | --- | --- |
 | `colab ls [-s NAME] [PATH]` | List remote files on the VM |
-| `colab upload [-s NAME] [--resume] LOCAL REMOTE` | Upload bounded chunks, verify SHA-256, and atomically commit |
-| `colab download [-s NAME] [--resume] REMOTE LOCAL` | Download bounded chunks with verified resume |
+| `colab upload [-s NAME] [--resume] [--json] LOCAL REMOTE` | Upload under a single-writer lease, verify SHA-256, and atomically commit |
+| `colab download [-s NAME] [--resume] [--json] REMOTE LOCAL` | Download under a single-writer lease with verified resume and atomic local replacement |
 | `colab rm [-s NAME] PATH` | Delete a remote file on the VM filesystem |
 | `colab edit [-s NAME] PATH` | Edit a remote file in-place using your local `$EDITOR` |
 
@@ -170,7 +171,15 @@ colab sessions --json
 colab status -s trainer --json
 colab status -s trainer --probe --json --timeout 20
 colab jobs -s trainer --json
+colab upload -s trainer --json repo.bundle content/repo.bundle
+colab download -s trainer --json content/model.ckpt ./model.ckpt
 ```
+
+Transfer JSON uses the stable `colab.transfer.v1` schema. Progress remains on
+stderr. If a transfer is interrupted, the JSON error carries
+`TRANSFER_INTERRUPTED`, exit code is `130`, and `resume_argv` contains a
+copy-safe command that preserves the selected auth/config/session/chunk
+identity.
 
 `--probe` requires one explicit `-s/--session`. It first reads the existing
 runtime resource endpoint and only uses the already-recorded kernel ID for one
@@ -199,6 +208,8 @@ colab stop -s analysis
 * **Transparent Code Execution:** When calling `colab exec -f file.py`, the CLI reads the file locally and transmits its content to the remote kernel. You do not need to manually upload files before execution.
 * **Storage & State Paths:** Session tokens and metadata are stored at `~/.config/colab-cli/sessions.json`. Global CLI settings are located at `~/.config/colab-cli/settings.json`. These can be customized or isolated via the global `--config` flag.
 * **Bulk Data:** CLI file transfer is designed for source bundles, checkpoints, and diagnostics. Keep multi-gigabyte datasets in Drive/GCS and localize them inside the VM.
+* **Transfer Ownership:** A second process targeting the same destination fails immediately. Lease files live under `~/.config/colab-cli/transfer-leases` (override with `COLAB_CLI_TRANSFER_LEASE_DIR` for isolated tests).
+* **Transfer Interruption:** Normal Ctrl+C exits 130 after releasing the local lease. The deterministic `.part` remains only when its prefix has already been verified, so the printed resume command can continue safely.
 * **Job Failure Boundary:** Persistent jobs survive local CLI disconnects, not Colab VM reclamation. A new VM cannot resume the old process; preserved status is reported as `lost`.
 * **Observation Boundary:** JSON observation is read-only with respect to CLI state and runtime allocation. Connecting to an existing runtime may still count as activity on the Colab service, but it does not create or renew an assignment.
 * **Execution Timeout Boundary:** `exec --timeout` and `run --timeout` limit how long the local client waits for one kernel execution. Expiry returns exit code `124`; it does not prove that an existing remote kernel stopped. Use `submit`/`wait` for long training.

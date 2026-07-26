@@ -24,7 +24,20 @@ from colab_cli.state import SessionState
 
 
 class RemoteExecutionError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message_or_name: str,
+        remote_value: str | None = None,
+    ) -> None:
+        if remote_value is None:
+            message = message_or_name
+            self.remote_name = None
+            self.remote_value = None
+        else:
+            message = f"{message_or_name}: {remote_value}".rstrip()
+            self.remote_name = message_or_name
+            self.remote_value = remote_value
+        super().__init__(message)
 
 
 class RemoteExecutor:
@@ -48,7 +61,7 @@ class RemoteExecutor:
             if output.get("output_type") == "error":
                 name = output.get("ename", "RemoteError")
                 value = output.get("evalue", "")
-                raise RemoteExecutionError(f"{name}: {value}".rstrip())
+                raise RemoteExecutionError(name, value)
             text = output.get("text")
             if isinstance(text, list):
                 text_parts.extend(str(part) for part in text)
@@ -109,6 +122,7 @@ def open_remote_executor(session: SessionState, store, history=None) -> RemoteEx
 class RemoteFileOps:
     def __init__(self, executor: RemoteExecutor):
         self.executor = executor
+        self.retry_count = 0
 
     def _execute_file_json(self, code: str, *, timeout: float = 30.0) -> dict:
         """Retry one idempotent file-control call on a stale transport."""
@@ -118,6 +132,7 @@ class RemoteFileOps:
         except RemoteExecutionError:
             raise
         except Exception:
+            self.retry_count += 1
             self.executor.reconnect()
             return self.executor.execute_json(code, timeout=timeout)
 
@@ -191,7 +206,11 @@ if actual_size != expected_size or actual_sha256 != expected_sha256:
         f'Upload verification failed: expected {{expected_size}}/{{expected_sha256}}, '
         f'got {{actual_size}}/{{actual_sha256}}'
     )
-if source_runtime_path == temp_runtime_path and os.path.exists(remote_runtime_path) and not overwrite:
+if (
+    source_runtime_path == temp_runtime_path
+    and os.path.exists(remote_runtime_path)
+    and not overwrite
+):
     raise FileExistsError(remote_runtime_path)
 os.makedirs(os.path.dirname(remote_runtime_path) or '/', exist_ok=True)
 if source_runtime_path == temp_runtime_path:
