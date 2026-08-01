@@ -1,5 +1,6 @@
 ---
 log:
+2026-08-02: Closed the Drive-mount authorization race found in a live Windows-to-Colab CPU session. `colab drivemount` now gives the remote `drive.mount()` request 10 minutes instead of leaving its hidden default at 120 seconds, while the local execution deadline includes an additional 60-second completion margin. Ephemeral credential propagation runs outside the WebSocket receive callback, matching the official Colab VS Code extension's non-blocking design, and opens the consent URL in the default browser while still printing it for manual recovery. Automation commands now reuse and persist the session's exact kernel/session IDs rather than creating an untracked kernel on each invocation. A live failure showed DriveFS starting at the old 120-second boundary and exiting with `CANNOT_START_CORE` before consent completed; an immediate second invocation then mounted successfully because credentials had finally propagated.
 2026-08-01: Added `colab login --force` as the explicit recovery path for local control-plane OAuth. Credential writes now use a same-directory temporary file, `fsync`, restrictive permissions, and atomic replacement; a failed fresh consent flow leaves the prior cache intact. Structured session/status output reports `AUTH_REAUTH_REQUIRED` instead of misclassifying human reauthentication as a generic assignment outage.
 2026-07-21: Pointed the update checker at the audited fork's GitHub Releases API. Upgrade hints and `colab update --install` now pin an exact fork tag; `--install` consumes only the version returned by the current successfully parsed and persisted check, so legacy PyPI cache entries, malformed responses, network failures, and settings-write failures cannot trigger installation.
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
@@ -154,19 +155,27 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
 -   **Action**: Execute `drive.mount()` and transparently proxy Colab's
     proprietary credential propagation flow.
 -   **Code**: `python from google.colab import drive
-    drive.mount('/content/drive')`
+    drive.mount('/content/drive', timeout_ms=600000)`
 -   **Handling**: Because `drivefs` enforces the ephemeral side-channel
     propagation (`colab_request` over websocket), the CLI intercepts these
-    messages using `ColabRuntime.colab_request_hook`. When intercepted, the CLI
-    automatically interacts with the Colab backend
+    messages using `ColabRuntime.colab_request_hook`. The receive callback
+    immediately delegates consent and propagation to a daemon worker so it
+    does not stall unrelated kernel messages. The worker automatically
+    interacts with the Colab backend
     (`/tun/m/credentials-propagation/`), prompts the user with the Google OAuth
-    consent URL if needed, and dispatches the required `colab_reply` message to
-    the `stdin` channel to unlock the kernel thread.
--   **Timeout**: The kernel is silent (no iopub traffic) the entire time the
-    user is OAuthing in their browser. To avoid the upstream 10s
-    `jupyter_kernel_client` default raising `TimeoutError` mid-flow, this
-    subcommand passes `timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC` (600s) to
-    `ColabRuntime.execute_code`. Same applies to `colab auth`.
+    consent URL if needed, opens it with the default browser, and dispatches
+    the required `colab_reply` message to the `stdin` channel to unlock the
+    kernel thread. The URL remains printed so browser-launch failure is
+    recoverable.
+-   **Timeout**: The remote `google.colab.drive.mount()` default waits only 120
+    seconds for auth. The CLI explicitly passes 600000 ms and gives the local
+    execution a further 60 seconds for DriveFS startup and reply delivery.
+    This keeps the remote and local deadlines ordered and bounded. `colab
+    auth` uses the same outer execution deadline.
+-   **Kernel identity**: Automation reuses the `kernel_id` and `session_id`
+    stored for the selected CLI session and persists newly allocated IDs.
+    Retrying an automation command therefore does not silently create an
+    orphan kernel.
 
 ### 4. Logging and Notebook Capture (`colab log`)
 

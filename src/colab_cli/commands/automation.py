@@ -13,20 +13,25 @@
 # limitations under the License.
 
 import datetime
+import json
+import logging
 import os
 import sys
-import json
-from typing import Optional, List
+import threading
+import webbrowser
+from typing import List, Optional
+
 import typer
 from rich.console import Console
 from typing_extensions import Annotated
 
-from colab_cli.runtime import ColabRuntime
-from colab_cli.contents import ContentsClient
 from colab_cli.auth import get_credentials
+from colab_cli.contents import ContentsClient
+from colab_cli.runtime import ColabRuntime
 from colab_cli.utils import get_status_code, render_display_data
 
 _console = Console()
+_logger = logging.getLogger(__name__)
 
 
 def _read_line_from_controlling_tty() -> str:
@@ -48,9 +53,124 @@ def _read_line_from_controlling_tty() -> str:
 # drivemount). The kernel goes silent while the user completes a browser
 # OAuth flow, which can routinely take 30s+; the upstream 10s default
 # raises ``TimeoutError`` mid-flow even though the mount actually succeeds.
-# 10 minutes is long enough for any realistic interactive auth ceremony
-# without leaving CI hangs unbounded.
-INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 600
+# The remote Drive helper otherwise stops waiting for auth after 120 seconds,
+# even if this CLI is still waiting. Keep the remote and local deadlines
+# aligned, with one minute for DriveFS startup and reply delivery.
+DRIVE_MOUNT_TIMEOUT_MS = 10 * 60 * 1000
+INTERACTIVE_AUTOMATION_TIMEOUT_SEC = DRIVE_MOUNT_TIMEOUT_MS // 1000 + 60
+
+
+def _send_drivefs_reply(deserialize_msg, wsclient, error: Optional[str] = None):
+    msg_id = deserialize_msg.get("metadata", {}).get("colab_msg_id")
+    value = {"type": "colab_reply", "colab_msg_id": msg_id}
+    if error:
+        value["error"] = error
+    reply = wsclient.session.msg("input_reply", {"value": value})
+    if "header" in deserialize_msg:
+        reply["parent_header"] = deserialize_msg["header"]
+    wsclient.stdin_channel.send(reply)
+
+
+def _log_drive_event(state, session_name, event_type, details):
+    try:
+        state.history.log_event(session_name, event_type, details)
+    except Exception:
+        _logger.debug("Failed to write Drive authorization history", exc_info=True)
+
+
+def _handle_drivefs_auth(state, session, deserialize_msg, wsclient):
+    """Complete one Drive consent request outside the WebSocket callback."""
+
+    try:
+        msg_id = deserialize_msg.get("metadata", {}).get("colab_msg_id")
+        _log_drive_event(
+            state,
+            session.name,
+            "colab_request",
+            {"type": "dfs_ephemeral", "colab_msg_id": msg_id},
+        )
+        url = (
+            f"{state.client.colab_domain}/tun/m/credentials-propagation/"
+            f"{session.endpoint}"
+        )
+        params = {
+            "authuser": "0",
+            "authtype": "dfs_ephemeral",
+            "version": "2",
+            "dryrun": "true",
+            "propagate": "true",
+            "record": "false",
+        }
+        typer.echo(
+            "\n[colab] Intercepted Drive Auth Request. Connecting to "
+            f"{state.client.colab_domain}..."
+        )
+
+        creds = get_credentials(state.client_oauth_config, provider=state.auth_provider)
+        resp = creds.request("GET", url, params=params)
+        token = (
+            json.loads(resp.text.split("\n", 1)[-1]).get("token")
+            if get_status_code(resp) == 200
+            else None
+        )
+        if not token:
+            raise RuntimeError("Drive credential propagation token is unavailable")
+
+        headers = {"x-goog-colab-token": token}
+        resp = creds.request(
+            "POST",
+            url,
+            params=params,
+            headers=headers,
+            files={"file_id": (None, "empty.ipynb")},
+        )
+        data = json.loads(resp.text.split("\n", 1)[-1])
+
+        if not data.get("success"):
+            uri = data.get("unauthorized_redirect_uri")
+            if not uri:
+                raise RuntimeError("Drive authorization URL is unavailable")
+            typer.echo(
+                "\n[colab] REQUIRED: Google Drive Authorization needed.\n"
+                f"Please visit:\n\n{uri}\n"
+            )
+            # The consent URL can contain short-lived authorization state. It
+            # belongs on the interactive console, not in durable history.
+            _log_drive_event(state, session.name, "drive_auth_needed", {})
+            try:
+                webbrowser.open(uri, new=2)
+            except (OSError, webbrowser.Error):
+                pass
+            sys.stdout.write("Press Enter after you have granted access... ")
+            sys.stdout.flush()
+            _read_line_from_controlling_tty()
+
+        typer.echo("[colab] Authorizing VM...")
+        params["dryrun"] = "false"
+        resp = creds.request(
+            "POST",
+            url,
+            params=params,
+            headers=headers,
+            files={"file_id": (None, "empty.ipynb")},
+        )
+        data = json.loads(resp.text.split("\n", 1)[-1])
+        if get_status_code(resp) != 200 or not data.get("success"):
+            raise RuntimeError("Drive credential propagation was unsuccessful")
+
+        typer.echo("[colab] Credentials propagated. Resuming mount...")
+        _log_drive_event(state, session.name, "drive_auth_success", {})
+        _send_drivefs_reply(deserialize_msg, wsclient)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        typer.echo(f"[colab] Drive authorization failed: {error}", err=True)
+        _log_drive_event(
+            state,
+            session.name,
+            "drive_auth_error",
+            {"error_type": type(exc).__name__},
+        )
+        _send_drivefs_reply(deserialize_msg, wsclient, error=error)
 
 
 def run_automation(
@@ -64,83 +184,35 @@ def run_automation(
     from colab_cli.common import state
 
     s = state.store.get(name)
-    runtime = ColabRuntime(s.url, s.token, session_name=s.name, history=state.history)
+
+    def on_started(kernel_id):
+        s.kernel_id = kernel_id
+        state.store.add(s)
+
+    def on_session_started(session_id):
+        s.session_id = session_id
+        state.store.add(s)
+
+    runtime = ColabRuntime(
+        s.url,
+        s.token,
+        session_name=s.name,
+        history=state.history,
+        kernel_id=s.kernel_id,
+        session_id=s.session_id,
+        on_kernel_started=on_started,
+        on_session_started=on_session_started,
+    )
 
     def drivefs_hook(deserialize_msg, wsclient):
         content = deserialize_msg.get("content", {})
         if content.get("request", {}).get("authType") == "dfs_ephemeral":
-            msg_id = deserialize_msg.get("metadata", {}).get("colab_msg_id")
-            state.history.log_event(
-                s.name,
-                "colab_request",
-                {"type": "dfs_ephemeral", "colab_msg_id": msg_id},
-            )
-            url = f"{state.client.colab_domain}/tun/m/credentials-propagation/{s.endpoint}"
-            params = {
-                "authuser": "0",
-                "authtype": "dfs_ephemeral",
-                "version": "2",
-                "dryrun": "true",
-                "propagate": "true",
-                "record": "false",
-            }
-            typer.echo(
-                f"\n[colab] Intercepted Drive Auth Request. Connecting to {state.client.colab_domain}..."
-            )
-
-            creds = get_credentials(
-                state.client_oauth_config, provider=state.auth_provider
-            )
-            resp = creds.request("GET", url, params=params)
-            token = (
-                json.loads(resp.text.split("\n", 1)[-1]).get("token")
-                if get_status_code(resp) == 200
-                else None
-            )
-
-            headers = {"x-goog-colab-token": token}
-            resp = creds.request(
-                "POST",
-                url,
-                params=params,
-                headers=headers,
-                files={"file_id": (None, "empty.ipynb")},
-            )
-            data = json.loads(resp.text.split("\n", 1)[-1])
-
-            if not data.get("success"):
-                uri = data.get("unauthorized_redirect_uri")
-                typer.echo(
-                    f"\n[colab] REQUIRED: Google Drive Authorization needed.\nPlease visit:\n\n{uri}\n"
-                )
-                state.history.log_event(s.name, "drive_auth_needed", {"uri": uri})
-                sys.stdout.write("Press Enter after you have granted access... ")
-                sys.stdout.flush()
-                _read_line_from_controlling_tty()
-
-            typer.echo("[colab] Authorizing VM...")
-            params["dryrun"] = "false"
-            resp = creds.request(
-                "POST",
-                url,
-                params=params,
-                headers=headers,
-                files={"file_id": (None, "empty.ipynb")},
-            )
-            if get_status_code(resp) == 200:
-                typer.echo("[colab] Credentials propagated. Resuming mount...")
-                state.history.log_event(s.name, "drive_auth_success", {})
-                reply = wsclient.session.msg(
-                    "input_reply",
-                    {"value": {"type": "colab_reply", "colab_msg_id": msg_id}},
-                )
-                if "header" in deserialize_msg:
-                    reply["parent_header"] = deserialize_msg["header"]
-                wsclient.stdin_channel.send(reply)
-            else:
-                typer.echo(
-                    f"[colab] Error propagating: {get_status_code(resp)} {resp.text}"
-                )
+            threading.Thread(
+                target=_handle_drivefs_auth,
+                args=(state, s, deserialize_msg, wsclient),
+                name=f"colab-drive-auth-{s.name}",
+                daemon=True,
+            ).start()
             return True
         return False
 
@@ -217,7 +289,10 @@ def drivemount(
     from colab_cli.common import state
 
     name = state.resolve_session(session)
-    code = f"from google.colab import drive\ndrive.mount('{path}')"
+    code = (
+        "from google.colab import drive\n"
+        f"drive.mount({path!r}, timeout_ms={DRIVE_MOUNT_TIMEOUT_MS})"
+    )
     typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
     run_automation(
         name,
