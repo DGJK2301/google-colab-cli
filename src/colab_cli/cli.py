@@ -131,6 +131,7 @@ def callback(
         "doctor",
         "monitor",
         "attach",
+        "login",
     }
     raw_args = ctx.meta.get("colab_cli_raw_args", ())
     machine_output = (

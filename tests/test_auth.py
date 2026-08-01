@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 from google.auth.exceptions import ReauthFailError
+import colab_cli.auth as auth
 
 from colab_cli.auth import (
     CLOUD_SDK_CLIENT_ID,
@@ -43,6 +44,7 @@ def mock_deps(mocker):
     m_request = mocker.patch("colab_cli.auth.Request")
     m_session = mocker.patch("colab_cli.auth.requests.AuthorizedSession")
     m_resources = mocker.patch("colab_cli.auth.resources")
+    m_save = mocker.patch("colab_cli.auth._save_authorized_user_credentials")
 
     # By default, pretend oauth config doesn't exist anywhere
     m_exists.return_value = False
@@ -56,6 +58,7 @@ def mock_deps(mocker):
         "request": m_request,
         "session": m_session,
         "resources": m_resources,
+        "save": m_save,
     }
 
 
@@ -134,7 +137,7 @@ def test_get_credentials_expired_token_refresh(mock_deps):
         res = get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
 
     mock_creds.refresh.assert_called_once()
-    m_open.assert_any_call(TOKEN_CONFIG_PATH, "w")
+    mock_deps["save"].assert_called_once_with(mock_creds)
     assert res == mock_deps["session"].return_value
 
 
@@ -288,3 +291,38 @@ def test_custom_oauth_flow_does_not_request_cloud_sdk_reauthentication_scope():
     config = {"installed": {"client_id": "custom-client.apps.googleusercontent.com"}}
 
     assert _oauth_scopes(config) == PUBLIC_SCOPES
+
+
+def test_reauthorize_bypasses_cached_token_and_persists_new_credentials(
+    mock_deps, mocker
+):
+    mock_deps["exists"].side_effect = lambda path: (
+        path in {"dummy_config.json", TOKEN_CONFIG_PATH}
+    )
+    fresh = MagicMock()
+    remote_flow = mocker.patch("colab_cli.auth._run_remote_flow", return_value=fresh)
+    save = mocker.patch("colab_cli.auth._save_authorized_user_credentials")
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        result = auth.reauthorize("dummy_config.json")
+
+    assert result is fresh
+    remote_flow.assert_called_once()
+    mock_deps["creds_cls"].from_authorized_user_file.assert_not_called()
+    save.assert_called_once_with(fresh)
+
+
+def test_save_authorized_user_credentials_is_atomic_and_keeps_rapt(tmp_path):
+    token_path = tmp_path / "token.json"
+    credentials = MagicMock()
+    credentials.to_json.return_value = json.dumps(
+        {"refresh_token": "refresh", "rapt_token": "rapt"}
+    )
+
+    auth._save_authorized_user_credentials(credentials, str(token_path))
+
+    assert json.loads(token_path.read_text(encoding="utf-8")) == {
+        "refresh_token": "refresh",
+        "rapt_token": "rapt",
+    }
+    assert list(tmp_path.glob("*.tmp")) == []

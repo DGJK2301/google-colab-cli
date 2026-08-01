@@ -118,6 +118,7 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 ### Automation & Utilities
 | Command | Description |
 | --- | --- |
+| `colab login [--force]` | Refresh the local control-plane OAuth cache, or replace it through a fresh consent flow |
 | `colab auth [-s NAME]` | Authenticate the VM for GCP services (BigQuery, GCS, etc.) |
 | `colab drivemount [-s NAME] [PATH]` | Mount Google Drive on the VM (default: `/content/drive`) |
 | `colab install [-s NAME] [-r FILE \| PKG...]` | Install packages on the VM using `uv` (falls back to `pip`) |

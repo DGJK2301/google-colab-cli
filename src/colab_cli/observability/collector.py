@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from colab_cli.auth import ReauthenticationRequiredError
 from colab_cli.client import ListedAssignment
 from colab_cli.observability.models import (
     AssignmentObservation,
@@ -192,6 +193,15 @@ def _read_assignments(state):
             ObservationIssue(
                 code="ASSIGNMENTS_AUTH_FAILED",
                 message=f"Assignment query exited with code {exc.code}.",
+                source="control_plane",
+                retryable=True,
+            )
+        ]
+    except ReauthenticationRequiredError as exc:
+        return [], [
+            ObservationIssue(
+                code="AUTH_REAUTH_REQUIRED",
+                message=redact_text(str(exc)),
                 source="control_plane",
                 retryable=True,
             )

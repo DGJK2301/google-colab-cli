@@ -19,7 +19,44 @@ from typing_extensions import Annotated
 
 from colab_cli import auto_update
 from colab_cli.auto_update import get_app_version
+from colab_cli.auth import (
+    AuthProvider,
+    ReauthenticationRequiredError,
+    get_credentials,
+    reauthorize,
+)
 from colab_cli.common import state
+
+
+def login(
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Run a fresh browser consent flow instead of using cached credentials",
+        ),
+    ] = False,
+):
+    """Refresh or replace the local Colab control-plane OAuth credentials."""
+    if state.auth_provider is not AuthProvider.OAUTH2:
+        typer.echo(
+            "[colab] `login` manages the oauth2 cache. For --auth=adc, run "
+            "`gcloud auth application-default login`.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    try:
+        if force:
+            reauthorize(state.client_oauth_config)
+        else:
+            get_credentials(
+                state.client_oauth_config,
+                provider=AuthProvider.OAUTH2,
+            )
+    except ReauthenticationRequiredError as exc:
+        typer.echo(f"[colab] {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo("[colab] Control-plane OAuth credentials saved.")
 
 
 def pay():
@@ -427,6 +464,7 @@ def skill():
 
 
 def register(app: typer.Typer):
+    app.command()(login)
     app.command()(pay)
     app.command()(log)
     app.command(name="url")(url)

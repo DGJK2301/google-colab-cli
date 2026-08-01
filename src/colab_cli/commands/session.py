@@ -101,8 +101,8 @@ def _scope_remediation_message(provider) -> str:
     # OAuth2 (and any future provider) fallback.
     return (
         f"{common}\n"
-        "Delete the cached token at ~/.config/colab-cli/token.json and "
-        "re-run `colab new` to trigger a fresh consent flow."
+        "Run `colab login --force` to replace the cached control-plane "
+        "credentials, then re-run `colab new`."
     )
 
 

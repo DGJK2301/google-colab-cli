@@ -17,6 +17,7 @@ import requests
 from typer.testing import CliRunner
 
 from colab_cli.cli import app
+from colab_cli.auth import ReauthenticationRequiredError
 from colab_cli.observability.models import (
     DiskObservation,
     GpuObservation,
@@ -146,6 +147,23 @@ def test_sessions_json_includes_server_orphan_with_null_name(mock_common_state):
     payload = _json_stdout(result)
     assert payload["sessions"][0]["name"] is None
     assert payload["sessions"][0]["lifecycle"] == "orphan_server"
+
+
+def test_sessions_json_identifies_required_human_reauthentication(
+    mock_common_state,
+):
+    mock_common_state.store.list.return_value = {}
+    mock_common_state.client.list_assignments.side_effect = (
+        ReauthenticationRequiredError("run colab login --force")
+    )
+
+    result = runner.invoke(app, ["sessions", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _json_stdout(result)
+    assert payload["status"] == "partial"
+    assert payload["warnings"][0]["code"] == "AUTH_REAUTH_REQUIRED"
+    assert "colab login --force" in payload["warnings"][0]["message"]
 
 
 def test_sessions_json_redacts_home_from_last_execution(

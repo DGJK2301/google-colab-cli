@@ -382,6 +382,21 @@ def test_cli_help():
     assert "Commands" in result.output
 
 
+def test_login_force_runs_fresh_control_plane_oauth(mock_common_state, mocker):
+    from colab_cli.auth import AuthProvider
+
+    utility_state = mocker.patch("colab_cli.commands.utility.state")
+    utility_state.auth_provider = AuthProvider.OAUTH2
+    utility_state.client_oauth_config = "oauth-config.json"
+    fresh_login = mocker.patch("colab_cli.commands.utility.reauthorize")
+
+    result = runner.invoke(app, ["login", "--force"])
+
+    assert result.exit_code == 0, result.output
+    fresh_login.assert_called_once_with("oauth-config.json")
+    assert "saved" in result.output.lower()
+
+
 def _extract_command_names(help_output: str) -> list[str]:
     """Parse the command list out of a Typer/Click help output rendered
     inside a rich box (either rounded ╭/╰ or square ┌/└ styles — Rich picks

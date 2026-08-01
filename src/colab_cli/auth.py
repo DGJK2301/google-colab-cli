@@ -18,6 +18,7 @@ import logging
 from importlib import resources
 import os
 import sys
+import tempfile
 import warnings
 from typing import Optional
 
@@ -195,10 +196,7 @@ def _run_remote_flow(client_config: dict) -> Credentials:
     return flow.credentials
 
 
-def _get_google_auth_credentials(config_path: str) -> Credentials:
-    """
-    Retrieves credentials using standard public OAuth2 flow.
-    """
+def _load_oauth_client_config(config_path: str) -> dict:
     client_config = None
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
@@ -217,6 +215,48 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
             f"Client OAuth config not found at {config_path} and no inlined config available. "
             "Please provide a valid path via -c/--client-oauth-config."
         )
+    return client_config
+
+
+def _save_authorized_user_credentials(
+    creds: Credentials, token_path: Optional[str] = None
+) -> None:
+    """Atomically persist refresh and reauthentication credentials."""
+    token_path = token_path or TOKEN_CONFIG_PATH
+    token_dir = os.path.dirname(token_path) or "."
+    os.makedirs(token_dir, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=os.path.basename(token_path) + ".",
+        suffix=".tmp",
+        dir=token_dir,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as token_file:
+            token_file.write(creds.to_json())
+            token_file.flush()
+            os.fsync(token_file.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, token_path)
+        os.chmod(token_path, 0o600)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def reauthorize(config_path: str) -> Credentials:
+    """Run a fresh control-plane OAuth flow and replace the cached token."""
+    creds = _run_remote_flow(_load_oauth_client_config(config_path))
+    _save_authorized_user_credentials(creds)
+    return creds
+
+
+def _get_google_auth_credentials(config_path: str) -> Credentials:
+    """Retrieve credentials using the public OAuth2 flow."""
+    client_config = _load_oauth_client_config(config_path)
 
     oauth_scopes = _oauth_scopes(client_config)
 
@@ -237,10 +277,9 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
                 creds.refresh(Request())
             except ReauthFailError as e:
                 terminal_hint = (
-                    "Open an interactive terminal and run the same colab "
-                    "command once. Google will request a local reauthentication "
-                    "challenge; the resulting RAPT token is then cached for "
-                    "future silent refreshes."
+                    "Run `colab login --force` in an interactive terminal. "
+                    "The new refresh token and any RAPT token will be cached "
+                    "for future silent refreshes."
                 )
                 if not sys.stdin.isatty():
                     raise ReauthenticationRequiredError(terminal_hint) from e
@@ -254,12 +293,7 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
         if not creds:
             creds = _run_remote_flow(client_config)
 
-        # Save the credentials for the next run
-        try:
-            with open(TOKEN_CONFIG_PATH, "w") as token_file:
-                token_file.write(creds.to_json())
-        except Exception as e:
-            logger.error(f"Failed to save token to {TOKEN_CONFIG_PATH}: {e}")
+        _save_authorized_user_credentials(creds)
 
     return creds
 

@@ -1,5 +1,6 @@
 ---
 log:
+2026-08-01: Added `colab login --force` as the explicit recovery path for local control-plane OAuth. Credential writes now use a same-directory temporary file, `fsync`, restrictive permissions, and atomic replacement; a failed fresh consent flow leaves the prior cache intact. Structured session/status output reports `AUTH_REAUTH_REQUIRED` instead of misclassifying human reauthentication as a generic assignment outage.
 2026-07-21: Pointed the update checker at the audited fork's GitHub Releases API. Upgrade hints and `colab update --install` now pin an exact fork tag; `--install` consumes only the version returned by the current successfully parsed and persisted check, so legacy PyPI cache entries, malformed responses, network failures, and settings-write failures cannot trigger installation.
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
 2026-06-01: Enabled `colab update --install` self-update on macOS in addition to Linux. Refactored platform check logic to keep the implementation DRY and updated both tests and documentation. Also, on these platforms, an additional message is shown recommending `colab update --install` to upgrade in place, positioned above the standard `pip`/`uv` installation command.
@@ -13,7 +14,7 @@ log:
 2026-05-12: Added an optional `timeout=` parameter to `ColabRuntime.execute_code` that flows through to both the `execute()` and `execute_interactive()` branches. `colab auth` and `colab drivemount` now pass `timeout=600` (10 min) via a shared `INTERACTIVE_AUTOMATION_TIMEOUT_SEC` constant in `commands/automation.py`. Background: `jupyter_kernel_client` defaults to a 10s wall-clock timeout that is consumed even when the kernel is idle waiting on `input_request`. With the drivefs hook intercepting that request and prompting the user to OAuth in their browser, any user that takes >10s to click through (essentially everyone) hit `TimeoutError` and saw "drivemount failed" even though the mount had actually succeeded server-side. The fix is scoped narrowly to the two human-in-the-loop subcommands; non-interactive paths (`colab exec`, `colab run`, `colab install`, `colab repl --pipe`, `colab console --pipe`) keep the upstream default since they receive continuous iopub traffic that resets the practical inactivity ceiling.
 ---
 
-# Design: Automation and Utility (`auth`, `install`, `log`, `pay`, `version`, `update`, `whoami`)
+# Design: Automation and Utility (`login`, `auth`, `install`, `log`, `pay`, `version`, `update`, `whoami`)
 
 ## Overview
 
@@ -55,6 +56,14 @@ backend, selected via the global `--auth=<provider>` flag:
     must be completed in an interactive local terminal and cannot be bypassed.
     Workspace session policy, token revocation, or an expired RAPT session can
     still require later human reauthentication.
+
+    Use `colab login` to validate or silently refresh the existing cache. If
+    Google rejects the cached refresh/RAPT state, run `colab login --force` in
+    an interactive terminal. The fresh credentials replace `token.json` only
+    after the browser flow succeeds and the new cache has been flushed to a
+    same-directory temporary file. Do not delete `token.json` manually: doing
+    so discards the only reusable refresh credentials before replacement is
+    known to be valid.
 
     The official Colab VS Code extension uses the same basic lifecycle with a
     different client and store: it keeps its refresh token in VS Code
